@@ -1,0 +1,67 @@
+
+:root {
+  font-family: Inter, system-ui, Arial, sans-serif;
+  color: #e8eef7;
+  background: #08111d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; overflow: hidden; }
+#app { width: 100vw; height: 100vh; }
+canvas { display: block; }
+.panel {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 330px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid #2b415a;
+  border-radius: 14px;
+  background: rgba(7, 16, 28, .92);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.3);
+  z-index: 5;
+}
+h1 { font-size: 18px; margin: 0 0 4px; }
+.subtitle { color: #93a9c0; font-size: 12px; margin-bottom: 14px; }
+.section { border-top: 1px solid #26384d; padding-top: 12px; margin-top: 12px; }
+label { display: block; font-size: 12px; color: #a8bad0; margin: 9px 0 5px; }
+.row { display: flex; gap: 8px; align-items: center; }
+input[type=range] { width: 100%; }
+input[type=number], select {
+  width: 100%; padding: 7px 8px; border-radius: 7px;
+  border: 1px solid #334a63; background: #101e2e; color: #e8eef7;
+}
+button {
+  border: 1px solid #3a5875; background: #14263a; color: #eef6ff;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+}
+button:hover { background: #1b3550; }
+button.active { background: #24527a; }
+.metric { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 8px; }
+.metric div { padding: 8px; border-radius: 8px; background: #0e1c2b; }
+.metric span { display: block; font-size: 10px; color: #8198b0; }
+.metric strong { font-size: 13px; }
+.badge { font-size: 11px; color: #9fc2df; }
+#tooltip {
+  position: fixed; display: none; pointer-events: none; z-index: 10;
+  min-width: 190px; padding: 10px; border-radius: 9px;
+  background: rgba(5, 12, 20, .95); border: 1px solid #3d5874;
+  font-size: 11px; line-height: 1.5;
+}
+.help { font-size: 11px; line-height: 1.45; color: #9aadc2; }
+.warning { color: #f0c674; }
+.ok { color: #8ed6a5; }
+#overflowBadge { color: #ff8f6b; font-weight: 600; }
+.compass {
+  width: 46px; height: 46px; min-width: 46px; border-radius: 50%;
+  border: 1px solid #3a5875; background: #0e1c2b; position: relative;
+}
+.compass-arrow {
+  position: absolute; left: 50%; top: 50%; width: 3px; height: 17px;
+  background: #ffd23f; border-radius: 2px;
+  transform-origin: 50% 100%;
+  transform: translate(-50%, -100%) rotate(0deg) scaleY(0);
+  transition: transform .12s ease-out;
+}
