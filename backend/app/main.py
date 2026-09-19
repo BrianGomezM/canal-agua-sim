@@ -1,12 +1,13 @@
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import asyncio
 import json
+import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .model import Params, ShallowWaterSimulation, FLOORS
+from .model import Params, ChannelFlowSolver, TYPE_NAMES
 
-app = FastAPI(title="Simulación Canal de Agua - SCN")
+app = FastAPI(title="Flujo en un canal - Navier-Stokes 2D (SCN)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,61 +17,110 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+PARAM_FIELDS = {f.name for f in fields(Params)}
+# The mesh (400 x 40 m, 80 x 8 cells of 5 m) and the physics are those of the report and are fixed:
+# a client can only change how the solver is run.
+LIVE_FIELDS = ("omega", "tol", "sweeps_per_second")          # while it runs
+RESET_FIELDS = LIVE_FIELDS + ("initial_vx",)                # when it is restarted
+MAX_SWEEPS_PER_TICK = 50                                    # bounds the work done between two frames
+TICK = 1.0 / 60.0
+
+
+def merge_params(base: Params, incoming: dict, allowed) -> Params:
+    """Params with the `allowed` fields of `incoming` applied; raises ValueError if invalid."""
+    values = {**asdict(base), **{k: v for k, v in incoming.items() if k in allowed and k in PARAM_FIELDS}}
+    try:
+        return Params(**values)
+    except TypeError as exc:
+        raise ValueError(str(exc)) from exc
+
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "canal-agua"}
+    return {"status": "ok", "service": "canal-navier-stokes"}
 
 
-@app.get("/api/floors")
-def floors():
-    return FLOORS
+@app.get("/api/mesh")
+def mesh():
+    return ChannelFlowSolver(Params()).mesh()
+
+
+@app.get("/api/cell-types")
+def cell_types():
+    return {str(k): v for k, v in TYPE_NAMES.items()}
 
 
 @app.websocket("/ws/sim")
 async def simulation_socket(ws: WebSocket):
     await ws.accept()
     params = Params()
-    sim = ShallowWaterSimulation(params)
+    sim = ChannelFlowSolver(params)
     running = True
+    inbox: asyncio.Queue = asyncio.Queue()
 
-    await ws.send_json({"type": "state", "data": sim.sample(max_nx=params.nx, max_ny=params.ny)})
+    async def reader():
+        # Messages are read concurrently with the iteration, so the pace of the animation does not
+        # depend on polling the socket with timeouts (timer granularity is coarse on Windows).
+        try:
+            while True:
+                await inbox.put(await ws.receive_text())
+        except (WebSocketDisconnect, RuntimeError):
+            await inbox.put(None)
 
+    reader_task = asyncio.create_task(reader())
+    await ws.send_json({"type": "mesh", "data": sim.mesh()})
+    await ws.send_json({"type": "state", "data": sim.sample()})
+
+    budget = 0.0                    # fractional iterations owed to the animation pace
+    last = time.perf_counter()
     try:
         while True:
-            # Wait briefly for control messages without blocking the simulation.
-            try:
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=0.01)
-                data = json.loads(msg)
+            while not inbox.empty():
+                raw = inbox.get_nowait()
+                if raw is None:
+                    return
+                try:
+                    data = json.loads(raw)
+                    kind = data.get("type")
+                    if kind == "params":
+                        params = merge_params(params, data.get("params", {}), LIVE_FIELDS)
+                        sim.update_params(params)
+                        if sim.diverged:
+                            # A diverged state is not recoverable: restart from the initial guess.
+                            sim = ChannelFlowSolver(params)
+                            await ws.send_json({"type": "mesh", "data": sim.mesh()})
+                    elif kind == "reset":
+                        params = merge_params(params, data.get("params", {}), RESET_FIELDS)
+                        sim = ChannelFlowSolver(params)
+                        running = True
+                        await ws.send_json({"type": "mesh", "data": sim.mesh()})
+                    elif kind == "pause":
+                        running = False
+                    elif kind == "resume":
+                        running = True
+                    elif kind == "step":
+                        running = False
+                        sim.sweep()
+                    await ws.send_json({"type": "state", "data": sim.sample()})
+                except ValueError as exc:
+                    await ws.send_json({"type": "error", "message": str(exc)})
 
-                if data.get("type") == "params":
-                    incoming = data.get("params", {})
-                    params = Params(**{**asdict(params), **incoming})
-                    sim.update_params(params)
-
-                elif data.get("type") == "reset":
-                    params = Params(**data.get("params", asdict(params)))
-                    sim = ShallowWaterSimulation(params)
-
-                elif data.get("type") == "pause":
-                    running = False
-
-                elif data.get("type") == "resume":
-                    running = True
-
-            except asyncio.TimeoutError:
-                pass
-
-            if running:
-                dt = sim.step()
-                # Full numerical resolution (no downsampling): the grid is
-                # small enough (nx*ny <= a few thousand cells) that sending
-                # it raw keeps the browser's surface mesh faithful to the
-                # solver instead of losing detail to stride-based sampling.
-                await ws.send_json({"type": "state", "data": sim.sample(max_nx=params.nx, max_ny=params.ny)})
-                await asyncio.sleep(0.03)
+            now = time.perf_counter()
+            if running and not (sim.converged or sim.diverged):
+                budget += sim.p.sweeps_per_second * (now - last)
+                n = min(int(budget), MAX_SWEEPS_PER_TICK)
+                budget = min(budget - n, 1.0)
+                for _ in range(n):
+                    sim.sweep()
+                    if sim.converged or sim.diverged:
+                        break
+                if n:
+                    await ws.send_json({"type": "state", "data": sim.sample()})
             else:
-                await asyncio.sleep(0.05)
-
+                budget = 0.0
+            last = now
+            await asyncio.sleep(TICK)
     except WebSocketDisconnect:
         return
+    finally:
+        reader_task.cancel()

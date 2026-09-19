@@ -1,115 +1,99 @@
-# Simulación numérica de un canal de agua
+# Flujo en un canal — Navier–Stokes 2D por diferencias finitas
 
-Proyecto educativo para **Simulación y Computación Numérica**.
+Proyecto de **Simulación y Computación Numérica**. Primer avance: **discretización y mallado**.
+
+Simula el flujo estacionario de un fluido que entra por un extremo de un canal de **400 × 40 m**,
+resolviendo las ecuaciones de Navier–Stokes 2D (ecs. 4.59–4.61 de la sección 4.6 de Landau y Páez,
+*Computational Problems for Physics*, CRC Press, 2018, pp. 144–147) con diferencias finitas
+centradas sobre una malla fija de **80 × 8 celdas de 5 m**.
 
 ## Qué contiene
 
-- **Backend Python + FastAPI + NumPy**: solver numérico.
-- **Frontend Three.js + Vite**: visualización 3D interactiva.
-- Canal físico de **400 × 40 m**.
-- Discretización rectangular configurable desde el backend.
-- Manguera de entrada con presión y **tamaño (diámetro) regulables** — el diámetro fija cuántas celdas de la malla reciben el caudal, así que tiene efecto hidráulico real, no solo visual. Llave 3D que gira al abrir/cerrar.
-- Encendido/apagado del flujo.
-- Variables exógenas: gravedad, viento (X **e Y**, con partículas de deriva sobre el agua y una brújula en el panel), lluvia (con partículas cayendo), sol/evaporación (con sprite de sol + niebla ascendente) y tipo de piso (concreto, asfalto, tierra, grava, superficie lisa, **madera**), cada uno con color/textura realista.
-- **Desborde real**: si la profundidad supera la altura de las paredes (`WALL_HEIGHT`), el agua sale del dominio (se resta del balance, no solo se recorta visualmente) y se muestra un aviso.
-- Puntero sobre el canal para consultar posición, profundidad, velocidad, componentes `u/v` y presión hidrostática aproximada.
-- `dt` adaptativo según una condición tipo CFL.
-- La altura del agua se dibuja con una **exageración vertical ×3** (solo visual, no afecta la física ni los valores del inspector) porque a la escala del canal (400×40 m) los cambios de profundidad de decenas de cm son casi imperceptibles sin ella.
+- **Backend (Python + FastAPI + NumPy)**: la malla, las 9 ecuaciones de celda y el solver de
+  relajación sucesiva ([backend/app/model.py](backend/app/model.py)), más el servidor WebSocket que
+  entrega el campo de velocidades a medida que el método itera ([backend/app/main.py](backend/app/main.py)).
+- **Frontend (Three.js + Vite)**: dos vistas del mismo campo calculado.
+  - *Mapa de calor*: una caja por celda, coloreada por |V|, vₓ, vᵧ o tipo de celda; con vectores,
+    relieve y malla.
+  - *Canal 3D (fluido)*: una superficie de agua que aparece donde el flujo calculado llega, con ondas
+    que se desplazan según la velocidad de cada punto.
+- **Pruebas** ([backend/tests/test_model.py](backend/tests/test_model.py)): comprueban la malla, las
+  9 ecuaciones contra una implementación independiente y el comportamiento del solver.
+- **Documentos** en [docs/](docs): modelo matemático y guía de la presentación.
 
-## Modelo matemático
+> La versión anterior del proyecto (aguas someras con viento, lluvia, sol y llave) sigue en la rama
+> `main`. Esta rama la reemplaza por el modelo del informe.
 
-El proyecto usa una **aproximación 2D de aguas someras (Saint-Venant)**, que es una reducción de las ecuaciones de Navier–Stokes bajo hipótesis de profundidad pequeña respecto de la escala horizontal.
+## Modelo
 
-Estado:
+Flujo estacionario, incompresible y bidimensional, canal ancho en z, **sin obstáculos**, con presión
+independiente de la densidad y **constante** (∂P/∂x = ∂P/∂y = 0):
 
-- `h(x,y,t)`: profundidad del agua.
-- `u(x,y,t)`: velocidad media en X.
-- `v(x,y,t)`: velocidad media en Y.
+    ν (∂²vₓ/∂x² + ∂²vₓ/∂y²) = vₓ ∂vₓ/∂x + vᵧ ∂vₓ/∂y        (4.60)
+    ν (∂²vᵧ/∂x² + ∂²vᵧ/∂y²) = vₓ ∂vᵧ/∂x + vᵧ ∂vᵧ/∂y        (4.61)
 
-Continuidad:
+con ν = 1 m²/s. La incompresibilidad (4.59) **no se impone** en esta etapa.
 
-    ∂h/∂t + ∂(hu)/∂x + ∂(hv)/∂y = R - E
+| Frontera | Condición |
+|---|---|
+| Entrada (izquierda) | vₓ = 1 m/s, vᵧ = 0 (Dirichlet) |
+| Piso y techo | vₓ = vᵧ = 0 (Dirichlet) |
+| Salida (derecha) | ∂v/∂x = 0 (Neumann, nodo fantasma: E = W) |
 
-Momentum, en forma educativa:
+### Malla
 
-    ∂u/∂t + u∂u/∂x + v∂u/∂y
-      = -g∂h/∂x + ν∇²u - F u + A_w
+Las celdas originales de 1 m se agrupan en bloques de 5 × 5 m: **80 × 8 = 640 celdas**, h = 5 m,
+640 × 2 = **1 280 incógnitas** (una ecuación para vₓ y otra para vᵧ por celda). Índices i = 0…79 (x,
+dirección del flujo) y j = 0…7 (y, hacia arriba; j = 0 es el piso). La malla **no se puede cambiar**
+desde la interfaz ni desde la API.
 
-    ∂v/∂t + u∂v/∂x + v∂v/∂y
-      = -g∂h/∂y + ν∇²v - F v
+### Ecuación de cada celda
 
-donde:
+Con diferencias centradas (error O(h²)) y despejando la celda central C, con vecinas
+E = (i+1, j), W = (i−1, j), N = (i, j+1), S = (i, j−1), a = vₓ(i, j), b = vᵧ(i, j) y q = h/(2ν) = 2.5:
 
-- `g`: gravedad.
-- `ν`: viscosidad cinemática efectiva.
-- `F`: término de resistencia del piso.
-- `A_w`: aceleración superficial simplificada por viento.
-- `R`: aporte de lluvia.
-- `E`: evaporación educativa.
+    C = ¼ [E + W + N + S − q·a·(E − W) − q·b·(N − S)]
 
-La presión hidrostática usada para consulta es:
+Donde a una celda de borde le falta una vecina se usa el valor de la frontera. Según qué vecinas
+falten hay **9 tipos** de ecuación:
 
-    p ≈ ρ g h
+| # | Tipo | Celdas | Sustitución |
+|---|---|---|---|
+| 1 | Interior | 468 | ninguna |
+| 2 | Entrada | 6 | W = 1 (vₓ) · W = 0 (vᵧ) |
+| 3 | Salida | 6 | E = W |
+| 4 | Piso | 78 | S = 0 |
+| 5 | Techo | 78 | N = 0 |
+| 6 | Esquina entrada–piso | 1 | W = 1 / 0, S = 0 |
+| 7 | Esquina entrada–techo | 1 | W = 1 / 0, N = 0 |
+| 8 | Esquina salida–piso | 1 | E = W, S = 0 |
+| 9 | Esquina salida–techo | 1 | E = W, N = 0 |
 
-con `ρ = 1000 kg/m³`.
+Las 9 ecuaciones escritas una a una están en [docs/modelo_matematico.md](docs/modelo_matematico.md).
 
-### Entrada de la manguera
+### Solución
 
-La presión de entrada se transforma en una velocidad aproximada mediante:
+El sistema es no lineal y acoplado (1 280 ecuaciones). Se resuelve por **relajación sucesiva** (ec. 4.63
+del libro): se recorre la malla reemplazando cada incógnita v por v + ω·(F − v), con F la ecuación de su
+tipo evaluada con los valores más recientes de las vecinas, hasta que el mayor cambio de un barrido sea
+menor que la tolerancia (por defecto 10⁻⁶).
 
-    u_in = C_d sqrt(2 Δp / ρ)
+## Qué se observa (y por qué)
 
-con `C_d = 0.85`.
-
-Esto NO pretende ser un modelo detallado de una instalación hidráulica real; es una entrada parametrizada para el proyecto académico.
-
-### Piso
-
-El tipo de piso modifica el coeficiente de Manning `n`, que se usa en el término de resistencia:
-
-- superficie lisa: 0.010
-- concreto: 0.013
-- asfalto: 0.016
-- tierra: 0.030
-- grava: 0.035
-
-Estos valores son parámetros iniciales del prototipo y deben justificarse/revisarse para el contexto físico que el grupo decida modelar.
-
-## Discretización
-
-El dominio es:
-
-    0 <= x <= 400
-    0 <= y <= 40
-
-Con `nx = 160`, `ny = 16`:
-
-    Δx = 400/160 = 2.5 m
-    Δy = 40/16 = 2.5 m
-
-El término de presión hidrostática y el término viscoso (lineales/difusivos) se aproximan con diferencias finitas centradas en el interior:
-
-    ∂f/∂x ≈ (f[i+1,j] - f[i-1,j])/(2Δx)
-
-    ∂f/∂y ≈ (f[i,j+1] - f[i,j-1])/(2Δy)
-
-y el laplaciano:
-
-    ∇²f ≈ (f[i+1,j]-2f[i,j]+f[i-1,j])/Δx²
-         + (f[i,j+1]-2f[i,j]+f[i,j-1])/Δy²
-
-Los términos **no lineales de advección** (`u∂u/∂x`, `v∂u/∂y`, y la divergencia del flujo de masa `∂(hu)/∂x`, `∂(hv)/∂y`) usan en cambio **diferencias upwind de primer orden**, elegidas según el signo de la velocidad de transporte:
-
-    ∂f/∂x ≈ (f[i,j] - f[i-1,j])/Δx   si vel ≥ 0
-    ∂f/∂x ≈ (f[i+1,j] - f[i,j])/Δx   si vel < 0
-
-Esto es necesario porque un esquema centrado (FTCS) es incondicionalmente inestable para la advección no lineal —lo comprobamos: con el canal seco y un chorro concentrado en la entrada, el esquema centrado explotaba en pocos cientos de pasos—. El upwind añade una difusión numérica de orden `Δx` (por Taylor), proporcional a la velocidad local, que estabiliza el frente de mojado sin esparcir el agua de forma no física por todo el ancho del canal. Ver `docs/modelo_matematico.md` §3.1 para el detalle.
-
-El paso temporal se limita con una condición tipo CFL:
-
-    Δt <= C min(Δx,Δy)/( |u| + |v| + sqrt(g h) )
-
-con `C = 0.35` en este prototipo.
+- **ω ≥ 0.95 no converge.** Con h = 5 m y ν = 1 m²/s el número de Reynolds de celda es 5 y, con vₓ = 1, el
+  coeficiente de la vecina E en la fórmula centrada es ¼(1 − 2.5) < 0. Converge para ω ≤ 0.9 (lo más
+  rápido cerca de 0.85, unas 220 iteraciones). Para ω ≥ 0.95, con vₓ = 1 de valor inicial diverge; con
+  vₓ = 0 de valor inicial, entre 0.95 y 1 no converge (el residuo no baja de ≈ 0.5, medido en 6 000
+  iteraciones) y desde 1.05 diverge. El valor por defecto es **ω = 0.8** (253–273 iteraciones).
+- **La solución no depende del valor inicial.** El informe sugiere vₓ = 1 en todo el canal; el valor por
+  defecto de la interfaz es vₓ = 0 (se ve el flujo entrar). Ambos convergen a la misma solución (diferencia
+  ≈ 4·10⁻⁵ con tolerancia 10⁻⁶).
+- **El flujo se frena y se apaga antes de la salida** (|V| ≥ 0.03 m/s solo hasta x ≈ 220 m). Es una
+  consecuencia del planteamiento (presión constante, paredes que frenan y continuidad no impuesta): la
+  solución es simétrica, con 0 ≤ vₓ ≤ 1 y vᵧ ≡ 0. No es un defecto del dibujo ni del solver.
+- **La animación de arranque es el avance de las iteraciones**, no tiempo real: el modelo es estacionario.
+  Cuando converge, el campo ya no cambia. El "agua", el frente, las ondas y el relieve del *Canal 3D* son
+  una representación visual del campo calculado (el modelo no tiene profundidad).
 
 ## Cómo ejecutar
 
@@ -125,13 +109,7 @@ Windows:
     pip install -r requirements.txt
     python run.py
 
-El solver queda en:
-
-    http://127.0.0.1:8000
-
-Prueba de salud:
-
-    http://127.0.0.1:8000/api/health
+Queda en `http://127.0.0.1:8000` (prueba: `http://127.0.0.1:8000/api/health`).
 
 ### 2. Frontend
 
@@ -141,45 +119,43 @@ En otra terminal:
     npm install
     npm run dev
 
-Abrir la URL que indique Vite, normalmente:
+Abrir la URL que indique Vite, normalmente `http://localhost:5173`.
 
-    http://localhost:5173
+### 3. Pruebas
+
+    cd backend
+    python -m unittest discover -s tests
+
+## Interfaz
+
+- **Pausar / Reanudar, Paso, Reiniciar**: control de la iteración.
+- **Factor de relajación ω**, **tolerancia**, **valor inicial de vₓ** (al reiniciar) y **velocidad de la
+  animación** (iteraciones por segundo).
+- **Estilo de vista** (mapa de calor o canal 3D), **Mostrar** (|V|, vₓ, vᵧ o tipo de celda), y las
+  opciones **Vectores**, **Relieve** y **Malla**.
+- **Puntero de consulta**: al pasar el cursor por una celda se marca en amarillo y se muestran su tipo,
+  su centro, la sustitución de vecinas que usa y sus velocidades.
 
 ## Arquitectura
 
-    Three.js
-       │
-       │ WebSocket
-       ▼
-    FastAPI
-       │
-       ▼
-    NumPy / Solver
-       │
-       ▼
-    h,u,v, presión, dt
-       │
-       ▼
-    Three.js actualiza la superficie 3D
+    Three.js  ⇄  WebSocket  ⇄  FastAPI  →  solver NumPy/Python
+    (vistas)     /ws/sim       (main.py)    (model.py: malla, 9 ecuaciones, relajación)
 
-## Importante para la entrega
+**API HTTP**: `GET /api/health`, `GET /api/mesh` (malla y tipos de celda), `GET /api/cell-types`.
 
-Este prototipo prioriza que se pueda explicar la cadena:
+**WebSocket `/ws/sim`**:
 
-**fenómeno físico → modelo matemático → discretización → algoritmo → implementación → visualización → análisis de error/estabilidad**
+- Cliente → servidor: `{"type": "params", "params": {omega, tol, sweeps_per_second}}` (en marcha),
+  `{"type": "reset", "params": {omega, tol, initial_vx, sweeps_per_second}}`, `pause`, `resume`, `step`.
+  Cualquier otro parámetro (malla, ν, dimensiones) se ignora: son los del informe.
+- Servidor → cliente: `mesh` (dimensiones y tipo de cada celda), `state` (iteración, residuo, si convergió
+  o divergió, y los campos `vx` y `vy` por celda) y `error`.
 
-Para una versión final del curso conviene agregar:
+## Límites de esta etapa
 
-1. Comparación de soluciones al refinar la malla.
-2. Error entre mallas (`Δx`, `Δy` diferentes).
-3. Registro de error por iteración/tiempo.
-4. Verificación de conservación de masa.
-5. Condiciones de frontera documentadas.
-6. Validación contra un caso con solución conocida.
-7. Gráficas de velocidad/profundidad.
-8. Análisis de estabilidad y costo computacional.
-9. Si el profesor exige Navier–Stokes completo, reemplazar esta reducción por un solver de Navier–Stokes 2D incomprensible con presión obtenida mediante una ecuación de Poisson.
-
-## Nota sobre "sol" y variables exógenas
-
-El sol no aparece directamente como una fuerza en Navier–Stokes. En este prototipo se usa para representar una tasa de evaporación. Si se desea estudiar temperatura, habría que añadir una ecuación de energía/temperatura y acoplarla al flujo.
+- La continuidad (4.59) no se impone y la presión es constante; por eso el flujo no llega a la salida.
+- La solución analítica del libro (ec. 4.66) requiere ∂P/∂x ≠ 0, así que no aplica a este planteamiento (ver
+  [docs/modelo_matematico.md](docs/modelo_matematico.md), §7).
+- Con h = 5 m el esquema centrado no admite ω ≥ 0.95; la sobrerrelajación de la ec. 4.63 no es utilizable
+  con esta malla.
+- Falta el estudio de convergencia por refinamiento de malla y el error entre mallas (siguientes avances).

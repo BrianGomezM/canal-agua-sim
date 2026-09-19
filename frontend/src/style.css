@@ -53,15 +53,12 @@ button.active { background: #24527a; }
 .help { font-size: 11px; line-height: 1.45; color: #9aadc2; }
 .warning { color: #f0c674; }
 .ok { color: #8ed6a5; }
-#overflowBadge { color: #ff8f6b; font-weight: 600; }
-.compass {
-  width: 46px; height: 46px; min-width: 46px; border-radius: 50%;
-  border: 1px solid #3a5875; background: #0e1c2b; position: relative;
-}
-.compass-arrow {
-  position: absolute; left: 50%; top: 50%; width: 3px; height: 17px;
-  background: #ffd23f; border-radius: 2px;
-  transform-origin: 50% 100%;
-  transform: translate(-50%, -100%) rotate(0deg) scaleY(0);
-  transition: transform .12s ease-out;
-}
+.bad { color: #ff8f6b; font-weight: 600; }
+.legend { margin-top: 8px; }
+.legend-bar { height: 10px; border-radius: 5px; border: 1px solid #334a63; }
+.legend-labels { display: flex; justify-content: space-between; font-size: 10px; color: #8198b0; margin-top: 3px; }
+label.check { display: flex; align-items: center; gap: 6px; margin: 0; }
+table.types { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+table.types td { padding: 3px 4px; border-bottom: 1px solid #1c2c3f; }
+table.types td.num { text-align: right; color: #8198b0; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid #334a63; vertical-align: middle; }

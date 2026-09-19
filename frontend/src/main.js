@@ -4,853 +4,744 @@ import './style.css';
 
 const API = 'ws://127.0.0.1:8000/ws/sim';
 
+// Same palette for the nine cell types as in the report's mesh figure.
+const TYPE_COLORS = {
+  1: 0xffffff, 2: 0xffb347, 3: 0xb48be0, 4: 0x9fc5e8, 5: 0xb6d7a8,
+  6: 0x3c78d8, 7: 0x34a853, 8: 0xffe066, 9: 0xff66cc,
+};
+// Substitution made in the cell equation for each type (report, "Tipos de ecuación").
+const TYPE_RULES = {
+  1: 'ninguna (tiene las 4 vecinas)',
+  2: 'W = 1 (vx), W = 0 (vy)',
+  3: 'E = W',
+  4: 'S = 0',
+  5: 'N = 0',
+  6: 'W = 1 (vx), W = 0 (vy); S = 0',
+  7: 'W = 1 (vx), W = 0 (vy); N = 0',
+  8: 'E = W; S = 0',
+  9: 'E = W; N = 0',
+};
+const RAMP = ['#1b2a5c', '#2a7fb8', '#3fb8a0', '#e6d94c', '#f2542d'];
+const DIVERGING = ['#2a5db0', '#9fc5e8', '#f4f4f4', '#f0a98a', '#c0392b'];
+const WATER_RAMP = ['#5fb4d6', '#3e9ccb', '#2a86bd', '#1f6fae', '#17599a']; // slow -> fast, all water-like
+const RELIEF_HEAT = 14;    // height (scene units) of a cell at full speed when "relieve" is on
+const BASE_CANAL = 2.5;    // level of the fluid surface where the fluid has arrived
+const WET_LO = 0.02, WET_HI = 0.03; // |V| [m/s] below WET_LO the flow has not reached a point; above WET_HI it has
+const WAVE_AMP = 1.4;      // height of the waves at full speed when "relieve" is on (exaggerated)
+const FLOW_SCALE = 12;     // time acceleration of the surface ripples: 1 m/s moves them 12 m per second
+const HEAT_BG = 0x0b1522;
+const CANAL_BG = 0xeef3f7;
+
 const app = document.querySelector('#app');
 app.innerHTML = `
 <div class="panel">
-  <h1>Canal de agua — Simulación numérica</h1>
-  <div class="subtitle">Modelo 2D de aguas someras derivado de Navier–Stokes + diferencias finitas</div>
+  <h1>Canal 2D — Navier–Stokes</h1>
+  <div class="subtitle">Ecuaciones 4.60 y 4.61 · diferencias finitas centradas · relajación sucesiva</div>
 
   <div class="section">
     <div class="row">
-      <button id="toggleWater">Cerrar llave</button>
+      <button id="pause">Pausar</button>
+      <button id="step">Paso</button>
       <button id="reset">Reiniciar</button>
     </div>
-  </div>
+    <div class="help" id="meshInfo" style="margin-top:8px"></div>
 
-  <div class="section">
-    <label>Presión de entrada (kPa): <b id="pressureV">15.0</b></label>
-    <input id="pressure" type="range" min="0" max="50" step="0.5" value="15">
+    <label>Factor de relajación ω: <b id="omegaV">0.80</b></label>
+    <input id="omega" type="range" min="0.1" max="1.9" step="0.05" value="0.8">
+    <div class="help" id="omegaHelp"></div>
 
-    <label>Tamaño de la llave / manguera (m): <b id="hoseV">1.5</b></label>
-    <input id="hose" type="range" min="0.3" max="10" step="0.1" value="1.5">
-
-    <label>Gravedad (m/s²): <b id="gravityV">9.81</b></label>
-    <input id="gravity" type="range" min="0" max="20" step="0.01" value="9.81">
-    <div class="help" id="gravityHelp"></div>
-
-    <label>Viento en X (m/s): <b id="windV">0</b></label>
-    <input id="wind" type="range" min="-20" max="20" step="0.5" value="0">
-
-    <label>Viento en Y (m/s): <b id="windYV">0</b></label>
-    <input id="windY" type="range" min="-20" max="20" step="0.5" value="0">
-    <div class="row" style="align-items:center; gap:10px; margin-top:6px">
-      <div class="compass"><div id="windArrow" class="compass-arrow"></div></div>
-      <div class="help">Magnitud del viento: <b id="windMagV">0.0</b> m/s — partículas en el agua muestran la deriva.</div>
-    </div>
-
-    <label>Lluvia (mm/h): <b id="rainV">0</b></label>
-    <input id="rain" type="range" min="0" max="400" step="5" value="0">
-
-    <label>Sol / evaporación (0–1): <b id="sunV">0</b></label>
-    <input id="sun" type="range" min="0" max="1" step="0.05" value="0">
-
-    <label>Tipo de piso</label>
-    <select id="floor">
-      <option value="concrete">Concreto (n=0.013)</option>
-      <option value="asphalt">Asfalto (n=0.016)</option>
-      <option value="soil">Tierra (n=0.030)</option>
-      <option value="gravel">Grava (n=0.035)</option>
-      <option value="smooth">Superficie lisa (n=0.010)</option>
-      <option value="wood">Madera (n=0.012)</option>
+    <label>Tolerancia (máx. cambio por barrido)</label>
+    <select id="tol">
+      <option value="1e-3">1e-3</option>
+      <option value="1e-4">1e-4</option>
+      <option value="1e-5">1e-5</option>
+      <option value="1e-6" selected>1e-6</option>
+      <option value="1e-8">1e-8</option>
+      <option value="1e-10">1e-10</option>
     </select>
+
+    <label>Valor inicial de vx (al reiniciar)</label>
+    <select id="initial">
+      <option value="0" selected>0 — el flujo entra al canal</option>
+      <option value="1">1 — el del informe (todo el canal)</option>
+    </select>
+
+    <label>Velocidad de la animación: <b id="sweepsV">40</b> iteraciones/s</label>
+    <input id="sweeps" type="range" min="5" max="240" step="5" value="40">
+    <div class="help">Al arrancar se ve cómo converge el método (iteraciones); no es el paso del tiempo,
+      porque el modelo es estacionario. Cuando converge, el campo ya no cambia.</div>
   </div>
 
   <div class="section">
-    <div class="badge">Dimensiones físicas: 400 × 40 m</div>
-    <div class="badge">Malla computacional inicial: 160 × 16 celdas</div>
-    <div class="badge" id="status">Conectando...</div>
-    <div class="badge" id="overflowBadge" style="display:none">⚠ Desbordamiento por las paredes</div>
-    <div class="metric">
-      <div><span>Tiempo simulado</span><strong id="time">0.00 s</strong></div>
-      <div><span>Δt estable</span><strong id="dt">0.000 s</strong></div>
-      <div><span>Velocidad entrada</span><strong id="inlet">0.00 m/s</strong></div>
-      <div><span>Caudal aprox.</span><strong id="flow">0.00 m³/s</strong></div>
-      <div><span>Ancho de entrada</span><strong id="inletWidth">— m</strong></div>
-      <div><span>Desborde</span><strong id="overflow">0.00 m³/s</strong></div>
+    <label>Estilo de vista</label>
+    <select id="style">
+      <option value="heat" selected>Mapa de calor</option>
+      <option value="canal">Canal 3D (fluido)</option>
+    </select>
+    <label>Mostrar</label>
+    <select id="view">
+      <option value="speed">Velocidad |V|</option>
+      <option value="vx">Componente vx</option>
+      <option value="vy">Componente vy</option>
+      <option value="type">Tipo de celda (9 tipos)</option>
+    </select>
+    <div class="legend"><div id="legendBar" class="legend-bar"></div>
+      <div class="legend-labels"><span id="legendMin">0</span><span id="legendMax">1</span></div></div>
+    <div class="row" style="margin-top:8px; flex-wrap:wrap">
+      <label class="check"><input type="checkbox" id="vectors" checked> Vectores</label>
+      <label class="check"><input type="checkbox" id="relief"> Relieve</label>
+      <label class="check"><input type="checkbox" id="grid"> Malla</label>
     </div>
+    <div class="help" id="styleHelp"></div>
+  </div>
+
+  <div class="section">
+    <div class="badge" id="status">Conectando...</div>
+    <div class="metric">
+      <div><span>Iteración</span><strong id="iter">0</strong></div>
+      <div><span>Máx. cambio (residuo)</span><strong id="resid">—</strong></div>
+      <div><span>Malla</span><strong id="meshDims">—</strong></div>
+      <div><span>Incógnitas</span><strong id="unknowns">—</strong></div>
+      <div><span>Paso h</span><strong id="hval">—</strong></div>
+      <div><span>Re de celda (|v| = 1)</span><strong id="reh">—</strong></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <b style="font-size:12px">Los 9 tipos de ecuación</b>
+    <table class="types" id="typeTable"></table>
   </div>
 
   <div class="section">
     <b style="font-size:12px">Puntero de consulta</b>
-    <div class="help">Mueve el cursor sobre el agua para consultar posición, profundidad, velocidad y presión hidrostática.</div>
+    <div class="help">Pase el cursor sobre una celda del canal: se marca en amarillo y aquí aparecen sus datos.</div>
     <div class="metric">
+      <div><span>celda (i, j)</span><strong id="pc">—</strong></div>
+      <div><span>tipo</span><strong id="pt">—</strong></div>
       <div><span>x</span><strong id="px">—</strong></div>
       <div><span>y</span><strong id="py">—</strong></div>
-      <div><span>profundidad h</span><strong id="ph">—</strong></div>
-      <div><span>velocidad |V|</span><strong id="ps">—</strong></div>
-      <div><span>u</span><strong id="pu">—</strong></div>
-      <div><span>v</span><strong id="pv">—</strong></div>
-      <div><span>presión</span><strong id="pp">—</strong></div>
-      <div><span>celda</span><strong id="pc">—</strong></div>
+      <div><span>vx</span><strong id="pu">—</strong></div>
+      <div><span>vy</span><strong id="pv">—</strong></div>
+      <div><span>|V|</span><strong id="ps">—</strong></div>
     </div>
   </div>
 
   <div class="section help">
-    <b>Interpretación:</b> la presión de entrada se convierte en velocidad de la manguera
-    mediante una relación tipo Bernoulli; el tamaño de la llave fija el ancho real de esa
-    entrada (más celdas forzadas = más caudal). Gravedad, viento y lluvia son entradas exógenas.
-    El tipo de piso modifica la resistencia mediante el coeficiente de Manning. El sol se
-    modela aquí únicamente como una tasa de evaporación <i>exagerada</i> para que se note en
-    la demo (la evaporación real es de mm/día, no de mm/s). El viento usa un coeficiente de
-    arrastre superficial también exagerado por la misma razón — ver <code>README.md</code>.
-    Si la profundidad supera la altura de las paredes, el agua se desborda de verdad
-    (sale del balance de masa, no solo se recorta visualmente).
+    <b>Modelo:</b> flujo estacionario, incompresible y bidimensional en un canal de 400 × 40 m, sin
+    obstáculos, con presión constante (∂P = 0), ν = 1 m²/s. Entrada: vx = 1, vy = 0. Piso y techo:
+    v = 0. Salida: ∂v/∂x = 0 (E = W). Cada celda se calcula con sus cuatro vecinas (ecuaciones del
+    informe); el sistema no lineal se resuelve iterando hasta que el cambio sea menor que la
+    tolerancia. La continuidad (4.59) no se impone en esta etapa, y con presión constante el flujo
+    se frena y llega a cero antes de la salida.
   </div>
 </div>
 <div id="tooltip"></div>
 `;
 
 const el = id => document.getElementById(id);
+
+// ---------- colour ramps as lookup tables (no allocations while drawing) ----------
+function gradient(stops, t) {
+  const n = stops.length - 1;
+  const x = Math.min(1, Math.max(0, t)) * n;
+  const a = Math.min(n - 1, Math.floor(x));
+  return new THREE.Color(stops[a]).lerp(new THREE.Color(stops[a + 1]), x - a);
+}
+const LUT_SIZE = 256;
+function makeLUT(stops) {
+  const lin = new Float32Array(LUT_SIZE * 3), srgb = new Uint8Array(LUT_SIZE * 3);
+  for (let k = 0; k < LUT_SIZE; k++) {
+    const c = gradient(stops, k / (LUT_SIZE - 1));
+    lin.set([c.r, c.g, c.b], 3 * k);
+    const hex = c.getHex(); // sRGB
+    srgb.set([(hex >> 16) & 255, (hex >> 8) & 255, hex & 255], 3 * k);
+  }
+  return { lin, srgb };
+}
+const LUTS = { heat: makeLUT(RAMP), diverging: makeLUT(DIVERGING), water: makeLUT(WATER_RAMP) };
+
+// ---------- fluid surface shaders ----------
+// The velocity texture holds (vx, vy, |V|, wetness) per cell. The surface is flat at a base level
+// where the computed flow has arrived (wetness = 1) and dry elsewhere. A ripple pattern is carried
+// by the local velocity (two-phase "flow map"), so the surface visibly flows where the computed
+// velocity is non-zero and is calm where it is zero. With "relieve" on, the ripples also lift the
+// surface: waves that are taller where the flow is faster.
+const FLUID_COMMON = `
+  uniform float uTime;
+  uniform float uFlow;
+
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
+  float ripple(vec2 p) { return 0.6 * noise(p * 0.16) + 0.4 * noise(p * 0.42 + 17.0); }
+
+  // Ripple pattern carried by the velocity vel [m/s] at the world point p = (x, z).
+  float flowPattern(vec2 p, vec2 vel) {
+    float period = 1.4;
+    float t1 = fract(uTime / period), t2 = fract(uTime / period + 0.5);
+    float w1 = 1.0 - abs(2.0 * t1 - 1.0), w2 = 1.0 - abs(2.0 * t2 - 1.0);
+    return w1 * ripple(p - vel * (t1 * period * uFlow))
+         + w2 * ripple(p - vel * (t2 * period * uFlow) + 5.31);
+  }
+`;
+const FLUID_VERT = `
+  ${FLUID_COMMON}
+  uniform sampler2D uVel;
+  uniform vec2 uSize;      // channel length and width [m]
+  uniform vec2 uTexSize;   // cells along x and y
+  uniform float uRelief;   // 1 = waves lift the surface
+  uniform float uWaveAmp;  // wave height at full speed
+  uniform float uBase;     // level of the surface where the fluid has arrived
+  uniform float uInlet;
+  varying vec2 vUv;
+  varying vec3 vWorld;
+  varying vec3 vNormal;
+
+  // Base level of the surface: 0 (floor) where the flow has not arrived, uBase where it has.
+  float surfaceAt(vec2 uv) { return smoothstep(0.0, 1.0, texture2D(uVel, uv).w) * uBase; }
+
+  void main() {
+    vUv = uv;
+    vec4 v = texture2D(uVel, uv);
+    vec3 pos = position;
+    float moving = smoothstep(0.0, 0.12, v.z / uInlet);   // calm where the flow stops
+    float wave = uRelief * uWaveAmp * moving * (flowPattern(pos.xz, vec2(v.x, -v.y)) - 0.5);
+    pos.y += 0.15 + surfaceAt(uv) + smoothstep(0.0, 1.0, v.w) * wave;
+    vec2 du = vec2(1.0 / uTexSize.x, 0.0);
+    vec2 dv = vec2(0.0, 1.0 / uTexSize.y);
+    float hx = surfaceAt(uv + du) - surfaceAt(uv - du);
+    float hy = surfaceAt(uv + dv) - surfaceAt(uv - dv);
+    vec3 dpdu = vec3(uSize.x * 2.0 * du.x, hx, 0.0);
+    vec3 dpdv = vec3(0.0, hy, -uSize.y * 2.0 * dv.y);   // v grows towards -z
+    vNormal = normalize(cross(dpdu, dpdv));
+    vWorld = (modelMatrix * vec4(pos, 1.0)).xyz;
+    gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
+  }
+`;
+const FLUID_FRAG = `
+  ${FLUID_COMMON}
+  uniform sampler2D uVel;
+  uniform sampler2D uColor;
+  uniform float uInlet;
+  varying vec2 vUv;
+  varying vec3 vWorld;
+  varying vec3 vNormal;
+
+  void main() {
+    vec4 v = texture2D(uVel, vUv);
+    if (v.w < 0.02) discard;                    // dry: the computed flow has not reached this point
+    vec2 vel = vec2(v.x, -v.y);                 // world (x, z); z = width/2 - y
+    vec2 p = vWorld.xz;
+    float n = flowPattern(p, vel);
+    float gx = flowPattern(p + vec2(0.7, 0.0), vel) - n;   // forward differences: 3 evaluations
+    float gz = flowPattern(p + vec2(0.0, 0.7), vel) - n;
+    float moving = smoothstep(0.0, 0.12, v.z / uInlet);   // calm where the flow stops
+    vec3 N = normalize(vNormal + moving * vec3(-gx, 0.0, -gz) * 4.4);
+    vec3 L = normalize(vec3(0.4, 1.0, 0.5));
+    float diff = 0.6 + 0.4 * max(dot(N, L), 0.0);
+    vec3 base = texture2D(uColor, vUv).rgb;
+    vec3 col = base * diff + moving * (n - 0.5) * 0.14;
+    float glint = pow(max(dot(reflect(-L, N), normalize(cameraPosition - vWorld)), 0.0), 40.0);
+    col += moving * 0.4 * glint;
+    col = mix(vec3(0.95, 0.98, 1.0), col, smoothstep(0.02, 0.5, v.w));   // thin foam line at the front
+    gl_FragColor = vec4(col, 1.0);
+    #include <colorspace_fragment>
+  }
+`;
+
+// ---------- three.js scene ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true;
 app.appendChild(renderer.domElement);
 
-const BG_COLOR = 0xeef3f7;
-const WALL_HEIGHT = 1.8; // must match backend WALL_HEIGHT (model.py) -- the real overflow threshold
-// The channel is 400 x 40 m but depth differences of interest are ~0.1-1.5 m
-// -- at that horizontal:vertical ratio a real depth change is nearly
-// imperceptible from a normal viewing angle. This scales the *rendered*
-// height of both the water and the walls (never the physics, never the
-// values shown in the inspector) so changes in pressure/gravity/rain are
-// actually visible, the same way a terrain map exaggerates elevation. Walls
-// are scaled by the same factor so "water about to spill over the wall"
-// stays visually true to the real overflow condition.
-const VERTICAL_EXAGGERATION = 3.0;
-
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(BG_COLOR);
-scene.fog = new THREE.Fog(BG_COLOR, 420, 950);
+scene.background = new THREE.Color(HEAT_BG);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.05));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(60, 140, 90);
+scene.add(sun);
 
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.95;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 1500);
-camera.position.set(230, 150, 280);
-
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 3000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0xb7c4cf, 0.85));
-const sunLight = new THREE.DirectionalLight(0xfff6e0, 1.4);
-sunLight.position.set(80, 160, 100);
-sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(2048, 2048);
-sunLight.shadow.camera.left = -230;
-sunLight.shadow.camera.right = 230;
-sunLight.shadow.camera.top = 230;
-sunLight.shadow.camera.bottom = -230;
-scene.add(sunLight);
+const CHANNEL_SPAN = 460;                                       // channel length + inlet/outlet arrows [m]
+const HEAT_DIR = new THREE.Vector3(0, 0.9, 0.44).normalize();   // camera direction from the target
+const CANAL_DIR = new THREE.Vector3(0.45, 0.5, 0.75).normalize();
 
-// Channel floor: physical size 400 x 40 m, centered at origin.
-// Each floor type gets a real base color plus a small procedural texture
-// (canvas-generated, tiled) so the material reads as concrete/wood/gravel/etc
-// instead of a flat color swatch.
-const FLOOR_COLORS = {
-  concrete: 0xb9c0c6,
-  asphalt: 0x35373b,
-  soil: 0x8a5a34,
-  gravel: 0xa89a83,
-  smooth: 0xd7e2e8,
-  wood: 0xa9713f,
-};
-const FLOOR_ROUGHNESS = {
-  concrete: .92, asphalt: .85, soil: .97, gravel: .95, smooth: .55, wood: .5,
-};
-
-function makeFloorTexture(kind) {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const ctx = c.getContext('2d');
-  const base = new THREE.Color(FLOOR_COLORS[kind] ?? FLOOR_COLORS.concrete);
-  ctx.fillStyle = `#${base.getHexString()}`;
-  ctx.fillRect(0, 0, 256, 256);
-
-  if (kind === 'wood') {
-    // Horizontal planks with a hand-drawn wood grain.
-    const plankH = 32;
-    for (let y = 0; y < 256; y += plankH) {
-      ctx.strokeStyle = 'rgba(35,18,6,0.45)';
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke();
-      for (let i = 0; i < 14; i++) {
-        const gy = y + 3 + Math.random() * (plankH - 6);
-        ctx.strokeStyle = `rgba(60,32,12,${0.08 + Math.random() * 0.12})`;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, gy);
-        for (let x = 0; x <= 256; x += 16) ctx.lineTo(x, gy + (Math.random() - 0.5) * 5);
-        ctx.stroke();
-      }
-    }
-  } else {
-    // Speckle/noise texture: density and contrast tuned per material.
-    const density = { concrete: 1400, asphalt: 2600, soil: 1000, gravel: 2200, smooth: 250 }[kind] ?? 1200;
-    const contrast = { concrete: 22, asphalt: 26, soil: 34, gravel: 55, smooth: 12 }[kind] ?? 20;
-    for (let i = 0; i < density; i++) {
-      const x = Math.random() * 256, y = Math.random() * 256;
-      const shade = (Math.random() - 0.5) * contrast;
-      ctx.fillStyle = shade > 0
-        ? `rgba(255,255,255,${Math.min(0.3, shade / 40)})`
-        : `rgba(0,0,0,${Math.min(0.3, -shade / 40)})`;
-      const r = kind === 'gravel' ? 1 + Math.random() * 2.2 : 0.5 + Math.random() * 0.9;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-    }
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(kind === 'wood' ? 16 : 14, kind === 'wood' ? 1.6 : 2);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-const floorTextureCache = {};
-function getFloorTexture(kind) {
-  if (!floorTextureCache[kind]) floorTextureCache[kind] = makeFloorTexture(kind);
-  return floorTextureCache[kind];
-}
-
-const floorGeo = new THREE.BoxGeometry(400, 1.0, 40);
-const floorMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: .95 });
-const floor = new THREE.Mesh(floorGeo, floorMat);
-floor.position.y = -0.5;
-floor.receiveShadow = true;
-scene.add(floor);
-
-function setFloorColor(key) {
-  floorMat.map = getFloorTexture(key);
-  floorMat.roughness = FLOOR_ROUGHNESS[key] ?? 0.9;
-  floorMat.needsUpdate = true;
-}
-
-// Side walls: drawn at WALL_HEIGHT * VERTICAL_EXAGGERATION so "water about
-// to top the wall" on screen matches the real overflow condition (h >
-// WALL_HEIGHT in the solver), even though the water's displayed height is
-// itself exaggerated for visibility (see VERTICAL_EXAGGERATION above).
-const WALL_TOP = WALL_HEIGHT * VERTICAL_EXAGGERATION;
-for (const z of [-20.5, 20.5]) {
-  const wall = new THREE.Mesh(
-    new THREE.BoxGeometry(400, WALL_TOP + 0.5, 1),
-    new THREE.MeshStandardMaterial({ color: 0x8296a6, roughness: .7 })
-  );
-  wall.position.set(0, (WALL_TOP - 0.5) / 2, z);
-  wall.castShadow = true;
-  scene.add(wall);
-}
-
-// Hose + valve share a parent group pivoted at the outlet, so the "hose
-// size" slider can scale the whole assembly without moving the nozzle tip
-// (which has to stay put — it is where the jet particles spawn). Positioned
-// above the (exaggerated) wall height so it visibly pours in from above it.
-const HOSE_Y = WALL_TOP + 1.2;
-const faucetGroup = new THREE.Group();
-faucetGroup.position.set(-200, HOSE_Y, 0);
-scene.add(faucetGroup);
-
-// Hose: short cylinder with visible outlet.
-const hose = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.65, 0.65, 8, 24),
-  new THREE.MeshStandardMaterial({ color: 0x222831, roughness: .7 })
-);
-hose.rotation.z = Math.PI / 2;
-hose.position.set(-4, 0, 0);
-faucetGroup.add(hose);
-
-// --- Water valve (faucet): visually opens/closes with "toggleWater". ---
-const valveGroup = new THREE.Group();
-valveGroup.position.set(-10, 0, 0);
-faucetGroup.add(valveGroup);
-
-const BASE_HOSE_DIAMETER = 1.5; // matches backend Params.hose_diameter default
-function setValveSize(diameterM) {
-  const scale = Math.min(2.2, Math.max(0.4, diameterM / BASE_HOSE_DIAMETER));
-  faucetGroup.scale.setScalar(scale);
-}
-
-const valveBody = new THREE.Mesh(
-  new THREE.CylinderGeometry(1.1, 1.1, 1.6, 20),
-  new THREE.MeshStandardMaterial({ color: 0x596471, metalness: .5, roughness: .4 })
-);
-valveBody.rotation.z = Math.PI / 2;
-valveGroup.add(valveBody);
-
-const wheelMat = new THREE.MeshStandardMaterial({ color: 0xb33b3b, metalness: .25, roughness: .5 });
-const wheelPivot = new THREE.Group();
-wheelPivot.position.x = -1.0;
-valveGroup.add(wheelPivot);
-
-const wheelRim = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.18, 12, 28), wheelMat);
-wheelRim.rotation.y = Math.PI / 2;
-wheelPivot.add(wheelRim);
-for (let k = 0; k < 4; k++) {
-  const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.18, 3.2, 0.18), wheelMat);
-  spoke.rotation.x = k * Math.PI / 4;
-  wheelPivot.add(spoke);
-}
-
-// Small indicator light next to the valve: green = open, red = closed.
-const indicatorMat = new THREE.MeshStandardMaterial({ color: 0x2ecc71, emissive: 0x1a8a4c, emissiveIntensity: .9 });
-const indicator = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), indicatorMat);
-indicator.position.set(0, 3.2, 0);
-valveGroup.add(indicator);
-
-let wheelTargetAngle = 0; // radians; spins a quarter turn per open/close.
-
-function setValveVisual(isOpen) {
-  wheelTargetAngle += isOpen ? Math.PI / 2 : -Math.PI / 2;
-  indicatorMat.color.setHex(isOpen ? 0x2ecc71 : 0xe74c3c);
-  indicatorMat.emissive.setHex(isOpen ? 0x1a8a4c : 0x9c2a1f);
-}
-
-// --- Water jet: small particle spray at the outlet, purely visual. ---
-const JET_COUNT = 140;
-const jetGeo = new THREE.BufferGeometry();
-const jetPositions = new Float32Array(JET_COUNT * 3);
-const jetState = new Float32Array(JET_COUNT * 4); // vx, vy, vz, age
-for (let i = 0; i < JET_COUNT; i++) {
-  jetState[i * 4 + 3] = 999; // start "dead", eligible to respawn once water is flowing
-  jetPositions[i * 3 + 1] = -50; // park below the floor until first respawn
-}
-jetGeo.setAttribute('position', new THREE.BufferAttribute(jetPositions, 3));
-const jetMat = new THREE.PointsMaterial({ color: 0x5bb8ec, size: 0.55, transparent: true, opacity: .85 });
-const jet = new THREE.Points(jetGeo, jetMat);
-scene.add(jet);
-const OUTLET = new THREE.Vector3(-200, HOSE_Y, 0);
-
-// FrontSide + depthWrite:false avoids the flicker/z-fighting that a
-// dynamic, transparent, double-sided mesh otherwise shows: WebGL has no
-// per-triangle sort for transparent objects, so overlapping front/back
-// faces of the same wavy surface "fight" for which one wins the depth
-// test, which reads as a random glinting/strobing artifact as the camera
-// or the wave shape changes. Depth-based vertex colors (set per frame)
-// give a more realistic look — shallow water reads lighter/greener,
-// deeper water reads darker blue — without needing an environment map.
-const waterMat = new THREE.MeshPhysicalMaterial({
-  color: 0xffffff, vertexColors: true, transparent: true, opacity: .90,
-  roughness: .22, metalness: .0, clearcoat: .4, clearcoatRoughness: .3,
-  side: THREE.FrontSide, depthWrite: false,
-});
-const SHALLOW_COLOR = new THREE.Color(0x6fc6e0);
-const DEEP_COLOR = new THREE.Color(0x063a6e);
-const WATER_Y_OFFSET = 0.015; // lifts the mesh clear of the dry floor (avoids z-fighting)
-// Color used a per-frame max(h) as its reference before, so the gradient
-// always spanned light-to-dark regardless of the *absolute* depth -- raising
-// the pressure or gravity changed the real depth a lot (verified against the
-// solver directly) but looked identical, because the color always
-// re-normalized to whatever the current peak was. Anchoring the gradient to
-// a fixed physical depth fixes that: shallow water now reads visibly lighter
-// than a deep pool, and stays that way as parameters change.
-const COLOR_REF_DEPTH = WALL_HEIGHT * 0.6;
-
-let waterMesh = null;
-let latest = null;
+let style = 'heat';      // 'heat' | 'canal'
+let mesh = null;         // last "mesh" message
+let latest = null;       // last "state" message data
+let cells = null;        // heat: InstancedMesh, one box per cell, index = j * nx + i
+let arrows = null;       // InstancedMesh, one arrow per cell (both styles)
+let frame = null;        // heat: walls and inlet/outlet arrows
+let canal = null;        // canal: group with floor, walls and the fluid surface
+let water = null;        // canal: the fluid surface mesh
+let gridLines = null;    // cell borders
+let hover = null;        // marker of the cell under the pointer
+let colorTex = null, velTex = null;
+// Velocity shown = eased towards the last solver state, so cells rise/fall smoothly.
+let tgtVx = null, tgtVy = null, curVx = null, curVy = null;
+let dirty = true;
+let flowTime = 0;
+let running = true;
 let socket = null;
-let waterOn = true;
 let lastSend = 0;
-let overflowSpots = []; // [{x, side}] cells currently pinned at WALL_HEIGHT, refreshed each server update
+const dummy = new THREE.Object3D();
 
-// The numerical grid (data.nx x data.ny, ~2.5 m per cell) looks faceted and
-// blocky if rendered directly at 400x40 m scale. This bilinearly upsamples
-// the depth field onto a finer *visual* grid only — the physics still runs
-// on the coarse solver grid; this interpolation is purely cosmetic, in the
-// same spirit as decoupling the numerical mesh from the render mesh.
-const VFX = 2, VFY = 4; // visual upsample factor per axis (y is coarser, needs more)
+// The control panel covers the left of the screen: shift the rendered image to the right by
+// half of the panel width and back the camera off until the whole channel fits in the free area.
+function fitView() {
+  const panel = document.querySelector('.panel');
+  const panelW = panel ? panel.offsetWidth + 16 : 0;
+  camera.aspect = innerWidth / innerHeight;
+  camera.setViewOffset(innerWidth, innerHeight, -panelW / 2, 0, innerWidth, innerHeight);
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  const freeW = Math.max(200, innerWidth - panelW - 32);
+  const halfTan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect;
+  const dist = (innerWidth * CHANNEL_SPAN) / (freeW * 2 * halfTan) * (style === 'canal' ? 1.2 : 1);
+  camera.position.copy(controls.target).addScaledVector(style === 'canal' ? CANAL_DIR : HEAT_DIR, dist);
+}
+fitView();
 
-function upsampleGrid(h, nx, ny, fx, fy) {
-  const nx2 = (nx - 1) * fx + 1;
-  const ny2 = (ny - 1) * fy + 1;
-  const out = new Float32Array(nx2 * ny2);
-  for (let jj = 0; jj < ny2; jj++) {
-    const gy = jj / fy;
-    const j0 = Math.min(ny - 2, Math.floor(gy));
-    const ty = gy - j0;
-    for (let ii = 0; ii < nx2; ii++) {
-      const gx = ii / fx;
-      const i0 = Math.min(nx - 2, Math.floor(gx));
-      const tx = gx - i0;
-      const h00 = h[j0][i0], h10 = h[j0][i0 + 1];
-      const h01 = h[j0 + 1][i0], h11 = h[j0 + 1][i0 + 1];
-      const hx0 = h00 * (1 - tx) + h10 * tx;
-      const hx1 = h01 * (1 - tx) + h11 * tx;
-      out[jj * nx2 + ii] = hx0 * (1 - ty) + hx1 * ty;
-    }
-  }
-  return { h: out, nx: nx2, ny: ny2 };
+function cellCenter(i, j) {
+  // World x follows i; world z = width/2 - y, so the ceiling (large y) is at the far side.
+  return [
+    -mesh.length / 2 + (i + 0.5) * mesh.h,
+    mesh.width / 2 - (j + 0.5) * mesh.h,
+  ];
 }
 
-function buildWater(vg) {
-  if (waterMesh) scene.remove(waterMesh);
-  const { nx, ny } = vg;
-  const positions = new Float32Array(nx * ny * 3);
-  const colors = new Float32Array(nx * ny * 3);
-  for (let j=0; j<ny; j++) {
-    const z = -20 + (j/(ny-1))*40;
-    for (let i=0; i<nx; i++) {
-      const x = -200 + (i/(nx-1))*400;
-      const k = j*nx+i;
-      positions[3*k] = x;
-      positions[3*k+1] = WATER_Y_OFFSET;
-      positions[3*k+2] = z;
-      colors[3*k] = colors[3*k+1] = colors[3*k+2] = 1;
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.setIndex([]);
-  waterMesh = new THREE.Mesh(geo, waterMat);
-  waterMesh.receiveShadow = true;
-  waterMesh.userData.nx = nx;
-  waterMesh.userData.ny = ny;
-  scene.add(waterMesh);
+function disposeObject(o) {
+  if (!o) return;
+  scene.remove(o);
+  o.traverse(c => { c.geometry?.dispose(); c.material?.dispose(); });
 }
 
-function updateWater(data) {
-  latest = data;
-  const vg = upsampleGrid(data.h, data.nx, data.ny, VFX, VFY);
-  if (!waterMesh || waterMesh.userData.nx !== vg.nx || waterMesh.userData.ny !== vg.ny) {
-    buildWater(vg);
+function buildScene() {
+  for (const o of [cells, arrows, frame, canal, gridLines, hover]) disposeObject(o);
+  colorTex?.dispose();
+  velTex?.dispose();
+  const { nx, ny, h } = mesh;
+  const n = nx * ny;
+
+  // --- heat map: one box per cell ---
+  cells = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(h * 0.94, 1, h * 0.94),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 }), n);
+  cells.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  cells.setColorAt(0, new THREE.Color(0xffffff)); // allocates instanceColor
+  cells.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  scene.add(cells);
+
+  frame = new THREE.Group();
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0x5f7387, roughness: 0.7 });
+  for (const s of [-1, 1]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(mesh.length + 2, 3, 1.2), wallMat);
+    wall.position.set(0, 1.5, s * (mesh.width / 2 + 0.9));
+    frame.add(wall);
   }
-  const { nx, ny, h } = vg;
-  const pos = waterMesh.geometry.attributes.position.array;
-  const col = waterMesh.geometry.attributes.color.array;
-  const indices = [];
-  const tsec = data.t;
+  for (const x of [-mesh.length / 2 - 14, mesh.length / 2 + 14]) {
+    for (const z of [-mesh.width * 0.3, 0, mesh.width * 0.3]) {
+      frame.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(x - 8, 2, z), 14, 0x5bb8ec, 5, 3));
+    }
+  }
+  scene.add(frame);
+
+  // --- velocity vectors (used by both styles) ---
+  const arrowGeo = new THREE.ConeGeometry(h * 0.16, h * 0.7, 8);
+  arrowGeo.rotateZ(-Math.PI / 2); // cone tip along +x
+  arrows = new THREE.InstancedMesh(arrowGeo, new THREE.MeshStandardMaterial({ color: 0x0b1522, roughness: 0.5 }), n);
+  arrows.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  scene.add(arrows);
+
+  // --- clean 3D channel: floor, walls (channel floor and ceiling) and the fluid surface ---
+  canal = new THREE.Group();
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(mesh.length, 1, mesh.width),
+    new THREE.MeshStandardMaterial({ color: 0xd3d6d0, roughness: 0.9 }));
+  floor.position.y = -0.5;
+  canal.add(floor);
+  const canalWall = new THREE.MeshStandardMaterial({ color: 0x8296a6, roughness: 0.7 });
+  const wallH = BASE_CANAL + WAVE_AMP + 1.5;
+  for (const s of [-1, 1]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(mesh.length + 2, wallH, 1.2), canalWall);
+    wall.position.set(0, wallH / 2, s * (mesh.width / 2 + 0.6));
+    canal.add(wall);
+  }
+  colorTex = new THREE.DataTexture(new Uint8Array(n * 4), nx, ny, THREE.RGBAFormat, THREE.UnsignedByteType);
+  velTex = new THREE.DataTexture(new Uint16Array(n * 4), nx, ny, THREE.RGBAFormat, THREE.HalfFloatType);
+  for (const t of [colorTex, velTex]) { t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearFilter; }
+  colorTex.colorSpace = THREE.SRGBColorSpace;
+  water = new THREE.Mesh(
+    new THREE.PlaneGeometry(mesh.length, mesh.width, Math.min(400, nx * 4), Math.min(160, ny * 4)).rotateX(-Math.PI / 2),
+    new THREE.ShaderMaterial({
+      vertexShader: FLUID_VERT,
+      fragmentShader: FLUID_FRAG,
+      uniforms: {
+        uVel: { value: velTex }, uColor: { value: colorTex }, uTime: { value: 0 },
+        uSize: { value: new THREE.Vector2(mesh.length, mesh.width) },
+        uTexSize: { value: new THREE.Vector2(nx, ny) },
+        uRelief: { value: 0 }, uWaveAmp: { value: WAVE_AMP }, uBase: { value: BASE_CANAL },
+        uInlet: { value: mesh.inlet_vx }, uFlow: { value: FLOW_SCALE },
+      },
+    }));
+  canal.add(water);
+  scene.add(canal);
+
+  // --- mesh lines (borders of the nx x ny cells) ---
+  const gp = [];
+  for (let i = 0; i <= nx; i++) {
+    const x = -mesh.length / 2 + i * h;
+    gp.push(x, 0, mesh.width / 2, x, 0, -mesh.width / 2);
+  }
+  for (let j = 0; j <= ny; j++) {
+    const z = mesh.width / 2 - j * h;
+    gp.push(-mesh.length / 2, 0, z, mesh.length / 2, 0, z);
+  }
+  const gg = new THREE.BufferGeometry();
+  gg.setAttribute('position', new THREE.Float32BufferAttribute(gp, 3));
+  gridLines = new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ transparent: true, opacity: 0.4 }));
+  scene.add(gridLines);
+
+  // --- marker of the cell under the pointer: yellow fill and outline, always on top ---
+  hover = new THREE.Group();
+  const fill = new THREE.Mesh(new THREE.PlaneGeometry(h, h).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.45, depthTest: false }));
+  const r = h / 2;
+  const outline = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints([[-r, 0, -r], [r, 0, -r], [r, 0, r], [-r, 0, r]].map(p => new THREE.Vector3(...p))),
+    new THREE.LineBasicMaterial({ color: 0xffb000, depthTest: false }));
+  fill.renderOrder = outline.renderOrder = 20;
+  hover.add(fill, outline);
+  hover.visible = false;
+  scene.add(hover);
+
+  tgtVx = new Float32Array(n); tgtVy = new Float32Array(n);
+  curVx = new Float32Array(n); curVy = new Float32Array(n);
+
+  el('meshDims').textContent = `${nx} × ${ny}`;
+  el('unknowns').textContent = mesh.unknowns.toLocaleString('es');
+  el('hval').textContent = `${h} m`;
+  el('reh').textContent = (h * mesh.inlet_vx / mesh.nu).toFixed(1);
+  el('meshInfo').innerHTML = `<b>Malla fija del informe:</b> ${nx} × ${ny} celdas de ${h} m (canal de ${mesh.length} × ${mesh.width} m), `
+    + `${nx * ny} celdas × 2 componentes = ${mesh.unknowns.toLocaleString('es')} incógnitas.`;
+
+  const rows = Object.entries(mesh.type_names).map(([t, name]) =>
+    `<tr><td><span class="sw" style="background:#${TYPE_COLORS[t].toString(16).padStart(6, '0')}"></span></td>`
+    + `<td>${t}</td><td>${name}</td><td class="num">${mesh.type_counts[t] ?? 0}</td></tr>`);
+  el('typeTable').innerHTML = rows.join('');
+  updateOmegaHelp();
+  applyStyle(true);
+}
+
+function range(view) {
+  const ref = mesh ? mesh.inlet_vx : 1;
+  return view === 'vy' ? [-0.1 * ref, 0.1 * ref] : [0, ref];
+}
+
+function currentLUT(view) {
+  return view === 'vy' ? LUTS.diverging : (style === 'canal' ? LUTS.water : LUTS.heat);
+}
+
+function updateLegend() {
+  const view = el('view').value;
+  const stops = view === 'vy' ? DIVERGING : (style === 'canal' ? WATER_RAMP : RAMP);
+  const [lo, hi] = range(view);
+  el('legendBar').style.background = `linear-gradient(to right, ${stops.join(',')})`;
+  el('legendBar').style.display = view === 'type' ? 'none' : 'block';
+  el('legendMin').textContent = view === 'type' ? '' : `${lo.toFixed(2)} m/s`;
+  el('legendMax').textContent = view === 'type' ? '' : `${hi.toFixed(2)} m/s`;
+}
+
+// Show/hide the objects of each style and refresh what depends on the controls.
+function applyStyle(refit = false) {
+  const heat = style === 'heat';
+  scene.background.setHex(heat ? HEAT_BG : CANAL_BG);
+  if (cells) cells.visible = heat;
+  if (frame) frame.visible = heat;
+  if (canal) canal.visible = !heat;
+  if (arrows) arrows.visible = el('vectors').checked && el('view').value !== 'type';
+  if (gridLines) {
+    gridLines.visible = el('grid').checked;
+    gridLines.position.y = heat ? 0.95 : BASE_CANAL + 0.35;
+    gridLines.material.color.setHex(heat ? 0xffffff : 0x0b2a4a);
+  }
+  el('styleHelp').textContent = heat
+    ? 'Una caja por celda de la malla. Relieve: la altura crece con |V| y las cajas suben y bajan a medida que converge el método.'
+    : 'El canal empieza vacío: el agua aparece donde el flujo calculado llega (|V| ≥ 0.03 m/s), con un frente que avanza desde la entrada, y queda seco donde el flujo se detiene (con este modelo, pasados ≈ 220 m). Las ondas se desplazan con la velocidad calculada (tiempo acelerado ×12). Relieve: oleaje que se desplaza, más alto donde el flujo es más rápido y en calma donde v = 0 (exagerado).';
+  updateLegend();
+  if (refit) fitView();
+  dirty = true;
+}
+
+// Copies the solver state into the targets; the eased values are rendered from animate().
+function paint(data) {
+  if (!mesh || !tgtVx) return;
+  const { nx, ny } = mesh;
+  const clamp = v => Math.max(-1e3, Math.min(1e3, v)); // keeps a diverged run drawable
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      tgtVx[j * nx + i] = clamp(data.vx[j][i]);
+      tgtVy[j * nx + i] = clamp(data.vy[j][i]);
+    }
+  }
+}
+
+// Draws the current (eased) field in the active style.
+function renderField() {
+  if (!mesh || !cells || !curVx) return;
+  const { nx, ny } = mesh;
+  const heat = style === 'heat';
+  const view = el('view').value;
+  const [lo, hi] = range(view);
+  const relief = el('relief').checked;
+  const lut = currentLUT(view);
+  const inlet = mesh.inlet_vx;
+  const texColor = heat ? null : colorTex.image.data;
+  const texVel = heat ? null : velTex.image.data;
+  const toHalf = THREE.DataUtils.toHalfFloat;
+  const colorAttr = cells.instanceColor;
 
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {
       const k = j * nx + i;
-      const depth = h[k];
-      // Cosmetic surface ripple, NOT part of the solver output: a couple of
-      // travelling sine waves whose amplitude grows with local depth, so a
-      // near-empty film stays flat and a deep pool visibly chops. Purely a
-      // rendering detail layered on top of the physical height.
-      const rippleAmp = Math.min(0.05, depth * 0.06);
-      const ripple = depth > 0.01
-        ? rippleAmp * (Math.sin(i * 0.35 + tsec * 2.2) + Math.sin(j * 0.6 - tsec * 1.6)) * 0.5
-        : 0;
-      pos[3 * k + 1] = (depth + ripple) * VERTICAL_EXAGGERATION + WATER_Y_OFFSET;
-      const t = Math.min(1, depth / COLOR_REF_DEPTH);
-      const c = SHALLOW_COLOR.clone().lerp(DEEP_COLOR, t);
-      col[3 * k] = c.r; col[3 * k + 1] = c.g; col[3 * k + 2] = c.b;
-    }
-  }
-  for (let j=0; j<ny-1; j++) {
-    for (let i=0; i<nx-1; i++) {
-      const a=j*nx+i, b=a+1, c=a+nx, d=c+1;
-      // Only draw a quad's two triangles where at least one corner is wet,
-      // so the dry floor shows through instead of a flat film at y=0.
-      const wet = h[a] > 0.004 || h[b] > 0.004 || h[c] > 0.004 || h[d] > 0.004;
-      if (wet) indices.push(a,c,b,b,c,d);
-    }
-  }
-  waterMesh.geometry.setIndex(indices);
-  waterMesh.geometry.attributes.position.needsUpdate = true;
-  waterMesh.geometry.attributes.color.needsUpdate = true;
-  waterMesh.geometry.computeVertexNormals();
+      const vx = curVx[k], vy = curVy[k], sp = Math.hypot(vx, vy);
+      const s = Math.min(1, sp / inlet);
+      const val = view === 'vx' ? vx : view === 'vy' ? vy : sp;
+      const idx = Math.max(0, Math.min(LUT_SIZE - 1, Math.round((val - lo) / (hi - lo) * (LUT_SIZE - 1))));
+      const top = heat ? (relief ? 0.4 + RELIEF_HEAT * s : 0.8) : BASE_CANAL; // the fluid surface is flat; waves are drawn by the shader
+      const [x, z] = cellCenter(i, j);
 
-  el('time').textContent = `${data.t.toFixed(2)} s`;
-  el('dt').textContent = `${data.dt.toFixed(4)} s`;
-  el('inlet').textContent = `${data.inlet_velocity.toFixed(2)} m/s`;
-  el('flow').textContent = `${data.flow_rate_approx.toFixed(3)} m³/s`;
-  el('inletWidth').textContent = `${data.inlet_width.toFixed(2)} m`;
-  el('overflow').textContent = `${data.overflow_rate.toFixed(3)} m³/s`;
-  el('overflowBadge').style.display = data.overflow_rate > 0.001 ? 'block' : 'none';
-
-  // Find where the water is actually pinned at the wall height (the backend
-  // clips h to WALL_HEIGHT exactly at overflowing cells), so the spill
-  // particles fall from the real location instead of a generic spot.
-  overflowSpots = [];
-  if (data.overflow_rate > 0.001) {
-    const ny = data.ny, nx = data.nx;
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        if (data.h[j][i] >= data.wall_height - 0.02) {
-          overflowSpots.push({
-            x: -200 + (i / (nx - 1)) * 400,
-            side: j < ny / 2 ? -1 : 1, // spill over the nearer wall
-          });
+      if (heat) {
+        if (view === 'type') {
+          const c = TYPE_COLORS[mesh.types[j][i]];
+          colorAttr.setXYZ(k, ((c >> 16) & 255) / 255, ((c >> 8) & 255) / 255, (c & 255) / 255);
+        } else {
+          colorAttr.setXYZ(k, lut.lin[3 * idx], lut.lin[3 * idx + 1], lut.lin[3 * idx + 2]);
         }
+        dummy.position.set(x, top / 2, z);
+        dummy.rotation.set(0, 0, 0);
+        dummy.scale.set(1, top, 1);
+        dummy.updateMatrix();
+        cells.setMatrixAt(k, dummy.matrix);
+      } else {
+        if (view === 'type') {
+          const c = TYPE_COLORS[mesh.types[j][i]];
+          texColor[4 * k] = (c >> 16) & 255; texColor[4 * k + 1] = (c >> 8) & 255; texColor[4 * k + 2] = c & 255;
+        } else {
+          texColor[4 * k] = lut.srgb[3 * idx]; texColor[4 * k + 1] = lut.srgb[3 * idx + 1]; texColor[4 * k + 2] = lut.srgb[3 * idx + 2];
+        }
+        texColor[4 * k + 3] = 255;
+        texVel[4 * k] = toHalf(vx); texVel[4 * k + 1] = toHalf(vy); texVel[4 * k + 2] = toHalf(sp);
+        texVel[4 * k + 3] = toHalf(Math.min(1, Math.max(0, (sp - WET_LO) / (WET_HI - WET_LO)))); // wetness: 1 where the flow has arrived
       }
+
+      const shown = heat || sp >= WET_LO;  // no vectors over dry (not yet reached) cells
+      dummy.position.set(x, top + 0.5, z);
+      dummy.rotation.set(0, Math.atan2(vy, vx), 0);
+      dummy.scale.setScalar(shown && s > 0.02 ? 0.25 + 0.75 * s : 0.0001);
+      dummy.updateMatrix();
+      arrows.setMatrixAt(k, dummy.matrix);
     }
+  }
+  arrows.instanceMatrix.needsUpdate = true;
+  if (heat) {
+    colorAttr.needsUpdate = true;
+    cells.instanceMatrix.needsUpdate = true;
+  } else {
+    colorTex.needsUpdate = true;
+    velTex.needsUpdate = true;
+    water.material.uniforms.uRelief.value = relief ? 1 : 0;
   }
 }
 
-function params() {
+// Moves the shown velocities towards the solver state; re-renders only while something changes.
+function easeField(dt) {
+  if (!curVx) return;
+  const a = 1 - Math.exp(-dt * 12);
+  let moving = false;
+  for (let k = 0; k < curVx.length; k++) {
+    const dx = tgtVx[k] - curVx[k], dy = tgtVy[k] - curVy[k];
+    if (Math.abs(dx) > 1e-5) { curVx[k] += dx * a; moving = true; }
+    if (Math.abs(dy) > 1e-5) { curVy[k] += dy * a; moving = true; }
+  }
+  if (moving || dirty) { renderField(); dirty = false; }
+}
+
+function showState(data) {
+  latest = data;
+  paint(data);
+  el('iter').textContent = data.iteration.toLocaleString('es');
+  el('resid').textContent = data.residual === null ? '—' : data.residual.toExponential(2);
+  const st = el('status');
+  if (data.diverged) { st.textContent = 'Divergió: reduzca ω y reinicie'; st.className = 'badge bad'; }
+  else if (data.converged) { st.textContent = `Convergió (residuo < ${data.tol.toExponential(0)})`; st.className = 'badge ok'; }
+  else if (!running) { st.textContent = 'En pausa'; st.className = 'badge warning'; }
+  else { st.textContent = 'Iterando…'; st.className = 'badge'; }
+}
+
+// ---------- controls ----------
+function send(type, params = {}) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type, params }));
+}
+
+function currentParams() {
   return {
-    pressure_kpa: +el('pressure').value,
-    gravity: +el('gravity').value,
-    wind_mps: +el('wind').value,
-    wind_y_mps: +el('windY').value,
-    rain_mm_h: +el('rain').value,
-    sun: +el('sun').value,
-    floor: el('floor').value,
-    water_on: waterOn,
-    hose_diameter: +el('hose').value,
+    omega: +el('omega').value, tol: +el('tol').value,
+    initial_vx: +el('initial').value, sweeps_per_second: +el('sweeps').value,
   };
 }
 
-function send(type='params') {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ type, params: params() }));
+function updateOmegaHelp() {
+  const om = +el('omega').value;
+  el('omegaHelp').textContent = om >= 0.95
+    ? 'Con esta malla (80 × 8, Re de celda = 5) el método no converge para ω ≥ 0.95 (diverge o el residuo no baja), incluido ω = 1 y la sobrerrelajación ω > 1.'
+    : 'ω < 1: subrelajación. Con esta malla converge para ω ≤ 0.9 (lo más rápido cerca de 0.85).';
 }
+updateOmegaHelp();
+
+el('omega').addEventListener('input', () => {
+  el('omegaV').textContent = (+el('omega').value).toFixed(2);
+  updateOmegaHelp();
+  if (performance.now() - lastSend > 80) { send('params', { omega: +el('omega').value }); lastSend = performance.now(); }
+});
+el('omega').addEventListener('change', () => send('params', { omega: +el('omega').value }));
+el('tol').addEventListener('change', () => send('params', { tol: +el('tol').value }));
+el('sweeps').addEventListener('input', () => {
+  el('sweepsV').textContent = el('sweeps').value;
+  send('params', { sweeps_per_second: +el('sweeps').value });
+});
+function restart() { running = true; el('pause').textContent = 'Pausar'; latest = null; send('reset', currentParams()); }
+el('initial').addEventListener('change', restart);
+el('reset').onclick = restart;
+el('pause').onclick = () => {
+  running = !running;
+  el('pause').textContent = running ? 'Pausar' : 'Reanudar';
+  send(running ? 'resume' : 'pause');
+};
+el('step').onclick = () => { running = false; el('pause').textContent = 'Reanudar'; send('step'); };
+el('style').addEventListener('change', () => { style = el('style').value; applyStyle(true); });
+for (const id of ['view', 'vectors', 'relief', 'grid']) el(id).addEventListener('change', () => applyStyle(false));
+updateLegend();
 
 function connect() {
   socket = new WebSocket(API);
   socket.onopen = () => {
     el('status').textContent = 'Conectado al solver Python';
     el('status').className = 'badge ok';
-    send();
+    running = true;
+    el('pause').textContent = 'Pausar';
+    send('reset', currentParams());
   };
   socket.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'state') updateWater(msg.data);
+    if (msg.type === 'mesh') { latest = null; mesh = msg.data; buildScene(); }
+    else if (msg.type === 'state') showState(msg.data);
+    else if (msg.type === 'error') {
+      el('status').textContent = `Error: ${msg.message}`;
+      el('status').className = 'badge bad';
+    }
   };
   socket.onclose = () => {
-    el('status').textContent = 'Desconectado — inicia el backend';
+    el('status').textContent = 'Desconectado — inicie el backend';
     el('status').className = 'badge warning';
     setTimeout(connect, 1500);
   };
 }
 connect();
 
-function updateWindCompass() {
-  const wx = +el('wind').value, wy = +el('windY').value;
-  const mag = Math.hypot(wx, wy);
-  el('windMagV').textContent = mag.toFixed(1);
-  const angleDeg = mag > 0.05 ? Math.atan2(wy, wx) * 180 / Math.PI : 0;
-  const len = Math.min(17, 6 + mag * 0.6);
-  const arrow = el('windArrow');
-  arrow.style.height = `${len}px`;
-  arrow.style.transform = `translate(-50%, -100%) rotate(${90 - angleDeg}deg) scaleY(${mag > 0.05 ? 1 : 0})`;
-}
-
-['pressure','gravity','wind','windY','rain','sun','hose'].forEach(id => {
-  const input = el(id);
-  const out = el(id+'V');
-  input.addEventListener('input', () => {
-    out.textContent = input.value;
-    if (id === 'gravity') updateGravityHelp(+input.value);
-    if (id === 'hose') setValveSize(+input.value);
-    if (id === 'wind' || id === 'windY') updateWindCompass();
-    if (id === 'sun') setSunVisual(+input.value);
-    if (performance.now() - lastSend > 80) { send(); lastSend = performance.now(); }
-  });
-});
-updateWindCompass();
-el('floor').addEventListener('change', () => { setFloorColor(el('floor').value); send(); });
-setFloorColor(el('floor').value);
-setValveSize(+el('hose').value);
-
-function updateGravityHelp(g) {
-  const help = el('gravityHelp');
-  if (g < 0.3) {
-    help.textContent = 'g≈0: sin presión hidrostática (∝ g·h) el chorro no tiene fuerza para esparcirse lateralmente — el modelo de aguas someras pierde sentido físico en este límite, no es un error del solver.';
-  } else if (g < 4) {
-    help.textContent = 'Gravedad baja (tipo Luna/Marte): el agua se esparce y ondula más lento, columnas más altas antes de caer.';
-  } else {
-    help.textContent = '';
-  }
-}
-updateGravityHelp(9.81);
-
-el('toggleWater').onclick = () => {
-  waterOn = !waterOn;
-  el('toggleWater').textContent = waterOn ? 'Cerrar llave' : 'Abrir llave';
-  el('toggleWater').classList.toggle('active', !waterOn);
-  setValveVisual(waterOn);
-  send();
-};
-el('reset').onclick = () => send('reset');
-
+// ---------- pointer inspector ----------
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const pickPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const pickPoint = new THREE.Vector3();
 
-// Visual marker that follows the pointer on the water surface.
-const marker = new THREE.Mesh(
-  new THREE.SphereGeometry(0.9, 16, 16),
-  new THREE.MeshStandardMaterial({ color: 0xffd23f, emissive: 0x8a6200, emissiveIntensity: .6 })
-);
-marker.visible = false;
-scene.add(marker);
+function speedAt(i, j) {
+  const k = j * mesh.nx + i;
+  return Math.hypot(curVx[k], curVy[k]);
+}
 
-renderer.domElement.addEventListener('pointermove', e => {
-  if (!waterMesh || !latest) { marker.visible = false; return; }
+// Height of the drawn surface over cell (i, j).
+function topAt(i, j) {
+  if (style === 'heat') return el('relief').checked ? 0.4 + RELIEF_HEAT * Math.min(1, speedAt(i, j) / mesh.inlet_vx) : 0.8;
+  return speedAt(i, j) >= WET_HI ? BASE_CANAL : 0.15;
+}
+
+// Cell whose column of the mesh the ray crosses at height y, or null if it is outside the channel.
+function cellAtHeight(y) {
+  pickPlane.constant = -y;
+  if (!raycaster.ray.intersectPlane(pickPlane, pickPoint)) return null;
+  const i = Math.floor((pickPoint.x + mesh.length / 2) / mesh.h);
+  const j = Math.floor((mesh.width / 2 - pickPoint.z) / mesh.h);
+  return i < 0 || j < 0 || i >= mesh.nx || j >= mesh.ny ? null : { i, j };
+}
+
+// Cell (i, j) under the pointer in the active style, or null.
+function pickCell(e) {
   pointer.x = (e.clientX / innerWidth) * 2 - 1;
   pointer.y = -(e.clientY / innerHeight) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hit = raycaster.intersectObject(waterMesh, false)[0];
-  if (!hit) { marker.visible = false; el('tooltip').style.display = 'none'; return; }
+  if (style === 'canal') {
+    // The fluid surface is drawn above the floor, so intersect the ray with that level (exact even
+    // in an oblique view); over cells the flow has not reached, the visible surface is the floor.
+    let cell = cellAtHeight(BASE_CANAL);
+    if (cell && speedAt(cell.i, cell.j) < WET_HI) cell = cellAtHeight(0.15);
+    return cell;
+  }
+  const hit = raycaster.intersectObject(cells, false)[0];
+  if (hit && hit.instanceId !== undefined) return { i: hit.instanceId % mesh.nx, j: Math.floor(hit.instanceId / mesh.nx) };
+  // The boxes leave a thin gap between cells: fall back to the mesh plane so the cell does not flicker.
+  return cellAtHeight(0.8);
+}
 
-  marker.visible = true;
-  marker.position.set(hit.point.x, hit.point.y + 0.15, hit.point.z);
-
-  const x = hit.point.x + 200;
-  const y = hit.point.z + 20;
-  const i = Math.max(0, Math.min(latest.nx-1, Math.round(x/latest.dx)));
-  const j = Math.max(0, Math.min(latest.ny-1, Math.round(y/latest.dy)));
-  const h = latest.h[j][i];
-  const s = latest.speed[j][i];
-
-  el('px').textContent = `${x.toFixed(1)} m`;
-  el('py').textContent = `${y.toFixed(1)} m`;
-  el('ph').textContent = `${h.toFixed(3)} m`;
-  el('ps').textContent = `${s.toFixed(3)} m/s`;
-  el('pu').textContent = `${latest.u[j][i].toFixed(3)} m/s`;
-  el('pv').textContent = `${latest.v[j][i].toFixed(3)} m/s`;
-  el('pp').textContent = `${latest.pressure_kpa[j][i].toFixed(3)} kPa`;
-  el('pc').textContent = `(${i}, ${j})`;
-
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!cells || !latest || !mesh || !curVx) return;
   const tip = el('tooltip');
+  const cell = pickCell(e);
+  if (!cell) { tip.style.display = 'none'; hover.visible = false; return; }
+  const { i, j } = cell;
+  const vx = latest.vx[j][i], vy = latest.vy[j][i], sp = Math.hypot(vx, vy);
+  const type = mesh.types[j][i];
+  const [cx, cz] = cellCenter(i, j);
+  hover.position.set(cx, topAt(i, j) + 0.8, cz);
+  hover.visible = true;
+  el('pc').textContent = `(${i}, ${j})`;
+  el('pt').textContent = `${type} · ${mesh.type_names[type]}`;
+  el('px').textContent = `${((i + 0.5) * mesh.h).toFixed(1)} m`;
+  el('py').textContent = `${((j + 0.5) * mesh.h).toFixed(1)} m`;
+  el('pu').textContent = vx.toFixed(4);
+  el('pv').textContent = vy.toFixed(4);
+  el('ps').textContent = sp.toFixed(4);
   tip.style.display = 'block';
-  tip.style.left = `${Math.min(e.clientX+14, innerWidth-210)}px`;
-  tip.style.top = `${Math.min(e.clientY+14, innerHeight-120)}px`;
-  tip.innerHTML = `<b>Celda (${i}, ${j})</b><br>h = ${h.toFixed(3)} m<br>|V| = ${s.toFixed(3)} m/s<br>p ≈ ${latest.pressure_kpa[j][i].toFixed(3)} kPa`;
+  tip.style.left = `${Math.min(e.clientX + 14, innerWidth - 230)}px`;
+  tip.style.top = `${Math.min(e.clientY + 14, innerHeight - 150)}px`;
+  tip.innerHTML = `<b>Celda (${i}, ${j})</b> · tipo ${type}: ${mesh.type_names[type]}<br>`
+    + `centro: x = ${((i + 0.5) * mesh.h).toFixed(1)} m, y = ${((j + 0.5) * mesh.h).toFixed(1)} m<br>`
+    + `sustitución: ${TYPE_RULES[type]}<br>`
+    + `vx = ${vx.toFixed(4)} m/s · vy = ${vy.toFixed(4)} m/s<br>|V| = ${sp.toFixed(4)} m/s`;
 });
-renderer.domElement.addEventListener('pointerleave', () => {
-  el('tooltip').style.display = 'none';
-  marker.visible = false;
-});
+renderer.domElement.addEventListener('pointerleave', () => { el('tooltip').style.display = 'none'; if (hover) hover.visible = false; });
 
-addEventListener('resize', () => {
-  camera.aspect = innerWidth/innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
-
-// --- Sun: a single billboard sprite (radial glow + baked rays), driven by
-// the "sun" slider. Also drives the directional light intensity, so a
-// brighter sun both looks brighter and evaporates faster (see model.py).
-function makeSunTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const ctx = c.getContext('2d');
-  const cx = 128, cy = 128;
-  ctx.save();
-  ctx.translate(cx, cy);
-  for (let k = 0; k < 16; k++) {
-    ctx.rotate(Math.PI * 2 / 16);
-    const len = 85 + (k % 2 === 0 ? 35 : 0);
-    const grad = ctx.createLinearGradient(0, 0, 0, -len);
-    grad.addColorStop(0, 'rgba(255,230,150,0.55)');
-    grad.addColorStop(1, 'rgba(255,230,150,0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.moveTo(-4, 0); ctx.lineTo(4, 0); ctx.lineTo(0, -len);
-    ctx.closePath(); ctx.fill();
-  }
-  ctx.restore();
-  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 55);
-  g.addColorStop(0, 'rgba(255,250,225,1)');
-  g.addColorStop(0.5, 'rgba(255,226,150,0.65)');
-  g.addColorStop(1, 'rgba(255,226,150,0)');
-  ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(cx, cy, 55, 0, Math.PI * 2); ctx.fill();
-  return new THREE.CanvasTexture(c);
-}
-const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-  map: makeSunTexture(), transparent: true, depthWrite: false,
-  depthTest: false, blending: THREE.AdditiveBlending, opacity: .4,
-}));
-sunSprite.renderOrder = 999;
-const SUN_DIR = new THREE.Vector3(80, 160, 100).normalize();
-sunSprite.position.copy(SUN_DIR.clone().multiplyScalar(420));
-sunSprite.scale.setScalar(120);
-scene.add(sunSprite);
-
-function setSunVisual(sun) {
-  sunLight.intensity = 0.5 + sun * 1.6;
-  sunSprite.material.opacity = 0.3 + sun * 0.7;
-  sunSprite.scale.setScalar(95 + sun * 75);
-}
-setSunVisual(0);
-
-// --- Wind: debris/foam particles drifting across the water surface in the
-// (wind_mps, wind_y_mps) direction. Purely cosmetic (the solver's own,
-// physically-tied wind stress on u/v is much smaller — see model.py — this
-// is what actually lets you *see* the wind, as requested).
-const WIND_COUNT = 90;
-const windGeo = new THREE.BufferGeometry();
-const windPositions = new Float32Array(WIND_COUNT * 3);
-const windAge = new Float32Array(WIND_COUNT);
-const windVel = new Float32Array(WIND_COUNT * 2);
-for (let i = 0; i < WIND_COUNT; i++) { windPositions[i * 3 + 1] = -50; windAge[i] = 999; }
-windGeo.setAttribute('position', new THREE.BufferAttribute(windPositions, 3));
-const windMat = new THREE.PointsMaterial({ color: 0xfbfdff, size: 0.9, transparent: true, opacity: .85 });
-const windParticles = new THREE.Points(windGeo, windMat);
-scene.add(windParticles);
-
-function updateWindParticles(dtFrame) {
-  const wx = +el('wind').value, wy = +el('windY').value;
-  const mag = Math.hypot(wx, wy);
-  const positions = windGeo.attributes.position.array;
-  for (let i = 0; i < WIND_COUNT; i++) {
-    windAge[i] += dtFrame;
-    if (mag > 0.3 && windAge[i] > 2.0 + Math.random() * 2.5) {
-      positions[i * 3] = -200 + Math.random() * 400;
-      positions[i * 3 + 1] = 0.4 + Math.random() * 0.5;
-      positions[i * 3 + 2] = -20 + Math.random() * 40;
-      windVel[i * 2] = wx * 0.55;
-      windVel[i * 2 + 1] = wy * 0.55;
-      windAge[i] = 0;
-    }
-    positions[i * 3] += windVel[i * 2] * dtFrame;
-    positions[i * 3 + 2] += windVel[i * 2 + 1] * dtFrame;
-    if (Math.abs(positions[i * 3]) > 205 || Math.abs(positions[i * 3 + 2]) > 22) windAge[i] = 999;
-  }
-  windGeo.attributes.position.needsUpdate = true;
-}
-
-// --- Rain: falling particles, density scaled with the rain_mm_h slider.
-const RAIN_COUNT = 600;
-const rainGeo = new THREE.BufferGeometry();
-const rainPositions = new Float32Array(RAIN_COUNT * 3);
-const rainVelY = new Float32Array(RAIN_COUNT);
-for (let i = 0; i < RAIN_COUNT; i++) rainPositions[i * 3 + 1] = -50;
-rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
-const rainMat = new THREE.PointsMaterial({ color: 0x8fc9e6, size: 0.45, transparent: true, opacity: .55 });
-const rainParticles = new THREE.Points(rainGeo, rainMat);
-scene.add(rainParticles);
-const RAIN_TOP = 70;
-
-function updateRain(dtFrame) {
-  const intensity = +el('rain').value; // mm/h, slider max 400
-  const activeCount = Math.round(Math.min(1, intensity / 400) * RAIN_COUNT);
-  const positions = rainGeo.attributes.position.array;
-  for (let i = 0; i < RAIN_COUNT; i++) {
-    if (i >= activeCount) { positions[i * 3 + 1] = -50; continue; }
-    if (positions[i * 3 + 1] < 0 || positions[i * 3 + 1] > RAIN_TOP) {
-      positions[i * 3] = -200 + Math.random() * 400;
-      positions[i * 3 + 1] = RAIN_TOP * (0.3 + Math.random() * 0.7);
-      positions[i * 3 + 2] = -20 + Math.random() * 40;
-      rainVelY[i] = -(20 + Math.random() * 10);
-    }
-    positions[i * 3 + 1] += rainVelY[i] * dtFrame;
-  }
-  rainGeo.attributes.position.needsUpdate = true;
-}
-
-// --- Mist: faint rising particles over the wet area near the inlet, a
-// visual cue for evaporation, spawned only when the sun is on.
-const MIST_COUNT = 50;
-const mistGeo = new THREE.BufferGeometry();
-const mistPositions = new Float32Array(MIST_COUNT * 3);
-const mistAge = new Float32Array(MIST_COUNT);
-for (let i = 0; i < MIST_COUNT; i++) { mistPositions[i * 3 + 1] = -50; mistAge[i] = 999; }
-mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPositions, 3));
-const mistMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.8, transparent: true, opacity: .25 });
-const mistParticles = new THREE.Points(mistGeo, mistMat);
-scene.add(mistParticles);
-
-function updateMist(dtFrame) {
-  const sun = +el('sun').value;
-  const positions = mistGeo.attributes.position.array;
-  const wetSpanX = latest ? Math.max(20, latest.t * 3) : 20; // mist follows the wedge as it advances
-  for (let i = 0; i < MIST_COUNT; i++) {
-    mistAge[i] += dtFrame;
-    if (sun > 0.05 && mistAge[i] > 1.2 + Math.random() * 2) {
-      positions[i * 3] = -198 + Math.random() * Math.min(380, wetSpanX);
-      positions[i * 3 + 1] = 0.3;
-      positions[i * 3 + 2] = -14 + Math.random() * 28;
-      mistAge[i] = 0;
-    }
-    positions[i * 3 + 1] += 0.7 * dtFrame;
-    positions[i * 3 + 2] += Math.sin(mistAge[i] * 2 + i) * 0.15 * dtFrame;
-    if (mistAge[i] > 3.5) mistAge[i] = 999;
-  }
-  mistGeo.attributes.position.needsUpdate = true;
-  mistMat.opacity = 0.12 + sun * 0.28;
-}
-
-// --- Overflow spill: water visibly falling over the wall wherever the
-// solver actually pins a cell at WALL_HEIGHT (see overflowSpots, filled in
-// updateWater from the live h field). This is the visual counterpart of the
-// real mass removed in model.py's overflow handling, not an independent effect.
-const SPILL_COUNT = 220;
-const spillGeo = new THREE.BufferGeometry();
-const spillPositions = new Float32Array(SPILL_COUNT * 3);
-const spillVel = new Float32Array(SPILL_COUNT * 3);
-const spillAge = new Float32Array(SPILL_COUNT);
-for (let i = 0; i < SPILL_COUNT; i++) { spillPositions[i * 3 + 1] = -80; spillAge[i] = 999; }
-spillGeo.setAttribute('position', new THREE.BufferAttribute(spillPositions, 3));
-const spillMat = new THREE.PointsMaterial({ color: 0x2f8fc9, size: 0.65, transparent: true, opacity: .85 });
-const spillParticles = new THREE.Points(spillGeo, spillMat);
-scene.add(spillParticles);
-
-function updateSpill(dtFrame) {
-  const positions = spillGeo.attributes.position.array;
-  for (let i = 0; i < SPILL_COUNT; i++) {
-    spillAge[i] += dtFrame;
-    if (overflowSpots.length && spillAge[i] > 0.04 + Math.random() * 0.12) {
-      const spot = overflowSpots[Math.floor(Math.random() * overflowSpots.length)];
-      positions[i * 3] = spot.x + (Math.random() - 0.5) * 2.5;
-      positions[i * 3 + 1] = WALL_TOP - 0.2;
-      positions[i * 3 + 2] = spot.side * 20.4;
-      spillVel[i * 3] = (Math.random() - 0.5) * 0.4;
-      spillVel[i * 3 + 1] = -0.5 - Math.random() * 0.8;
-      spillVel[i * 3 + 2] = spot.side * (2.5 + Math.random() * 2.5);
-      spillAge[i] = 0;
-    }
-    positions[i * 3] += spillVel[i * 3] * dtFrame;
-    positions[i * 3 + 1] += spillVel[i * 3 + 1] * dtFrame;
-    spillVel[i * 3 + 1] -= 9.81 * dtFrame; // falls under (real) gravity once outside the channel
-    positions[i * 3 + 2] += spillVel[i * 3 + 2] * dtFrame;
-    if (positions[i * 3 + 1] < -6) spillAge[i] = 999; // hit the ground outside -> eligible to respawn
-  }
-  spillGeo.attributes.position.needsUpdate = true;
-}
+addEventListener('resize', fitView);
 
 let lastFrame = performance.now();
-
-function updateJet(dtFrame) {
-  const g = latest ? +el('gravity').value : 9.81;
-  const speed = latest ? latest.inlet_velocity : 0;
-  const positions = jetGeo.attributes.position.array;
-
-  for (let i = 0; i < JET_COUNT; i++) {
-    const s = i * 4;
-    jetState[s + 3] += dtFrame; // age
-
-    if (waterOn && speed > 0.05 && jetState[s + 3] > 0.9 + Math.random() * 0.4 * (i % 5)) {
-      // Respawn at the outlet with velocity scaled from the inlet speed.
-      positions[i * 3] = OUTLET.x;
-      positions[i * 3 + 1] = OUTLET.y;
-      positions[i * 3 + 2] = OUTLET.z;
-      jetState[s] = Math.min(Math.max(speed, 1.0), 8) * (0.8 + Math.random() * 0.4);
-      jetState[s + 1] = (Math.random() - 0.5) * 0.6;
-      jetState[s + 2] = (Math.random() - 0.5) * 1.2;
-      jetState[s + 3] = 0;
-    }
-
-    positions[i * 3] += jetState[s] * dtFrame;
-    positions[i * 3 + 1] += jetState[s + 1] * dtFrame;
-    jetState[s + 1] -= g * dtFrame;
-    positions[i * 3 + 2] += jetState[s + 2] * dtFrame;
-
-    if (positions[i * 3 + 1] < 0) jetState[s + 3] = 999; // mark dead, will respawn
-  }
-  jetGeo.attributes.position.needsUpdate = true;
-}
-
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
-  const dtFrame = Math.min(0.05, (now - lastFrame) / 1000);
+  const dt = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
-
+  flowTime += dt;
+  if (water) water.material.uniforms.uTime.value = flowTime;
+  easeField(dt);
   controls.update();
-
-  wheelPivot.rotation.x += (wheelTargetAngle - wheelPivot.rotation.x) * 0.15;
-  updateJet(dtFrame);
-  updateWindParticles(dtFrame);
-  updateRain(dtFrame);
-  updateMist(dtFrame);
-  updateSpill(dtFrame);
-
   renderer.render(scene, camera);
 }
 animate();
