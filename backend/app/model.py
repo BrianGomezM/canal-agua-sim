@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 import math
 
+# |V| [m/s] from which the flow counts as having reached a point (also used to draw the water front).
+REACH_SPEED = 0.03
+
 # A sweep that changes a value by more than this [m/s] is taken as divergence: physical
 # velocities here are of order 1 m/s, and stopping early keeps the numbers finite and
 # JSON-serializable instead of overflowing to inf/NaN a few sweeps later.
@@ -38,7 +41,11 @@ class Params:
     # block must divide both length and width (criterion 1 of the report).
     block: int = 5
     nu: float = 1.0              # kinematic viscosity [m^2/s] (book value)
+    rho: float = 1000.0          # density [kg/m^3]; only matters when dpdx != 0
     inlet_vx: float = 1.0        # inlet velocity vx [m/s]; vy = 0 at the inlet
+    # Uniform pressure gradient dP/dx [Pa/m]. The report takes constant pressure (dpdx = 0); the book's
+    # solution (eq. 4.66) needs a negative gradient, which pushes the fluid towards the outlet.
+    dpdx: float = 0.0
     # Relaxation factor: 1 = Gauss-Seidel, > 1 = over-relaxation, < 1 = under-relaxation.
     # With the default mesh (h = 5 m, cell Reynolds number 5) the central scheme of the report
     # diverges for omega >= 0.95, so the default is an under-relaxation factor that converges.
@@ -61,6 +68,14 @@ class Params:
             raise ValueError("initial_vx must be between 0 and inlet_vx")
         if not 1.0 <= self.sweeps_per_second <= 1000.0:
             raise ValueError("sweeps_per_second must be between 1 and 1000")
+        if not 0.05 <= self.nu <= 100.0:
+            raise ValueError("nu must be between 0.05 and 100 m^2/s")
+        if not 0.05 <= self.inlet_vx <= 5.0:
+            raise ValueError("inlet_vx must be between 0.05 and 5 m/s")
+        if not -100.0 <= self.dpdx <= 100.0:
+            raise ValueError("dpdx must be between -100 and 100 Pa/m")
+        if not self.rho > 0.0:
+            raise ValueError("rho must be positive")
 
 
 def cell_type(i, j, nx, ny):
@@ -86,7 +101,7 @@ def cell_type(i, j, nx, ny):
     return INTERIOR
 
 
-def cell_equation(t, q, E, W, N, S, a, b, w_in):
+def cell_equation(t, q, E, W, N, S, a, b, w_in, pg=0.0):
     """
     The nine cell equations of the report, for either velocity component.
 
@@ -96,34 +111,37 @@ def cell_equation(t, q, E, W, N, S, a, b, w_in):
     0 for vy); q = h / (2 nu), which is h/2 for nu = 1.
 
     Central differences give (report, section 3.3):
-        C = 1/4 [E + W + N + S - q a (E - W) - q b (N - S)]
+        C = 1/4 [E + W + N + S - q a (E - W) - q b (N - S) - pg]
+    where pg = h^2 / (nu rho) dP/dx for the vx equation and 0 for vy (uniform pressure gradient
+    along x). The report takes constant pressure, so pg = 0 and the equations are exactly its own.
     Neighbours outside the mesh are replaced by the boundary condition: inlet W = w_in,
     floor S = 0, ceiling N = 0, outlet E = W (dv/dx = 0 through a ghost node). The
     arguments of a neighbour that does not exist for type t are ignored.
     """
     if t == INTERIOR:
-        return 0.25 * (E + W + N + S - q * a * (E - W) - q * b * (N - S))
+        return 0.25 * (E + W + N + S - q * a * (E - W) - q * b * (N - S) - pg)
     if t == INLET:
-        return 0.25 * (E + w_in + N + S - q * a * (E - w_in) - q * b * (N - S))
+        return 0.25 * (E + w_in + N + S - q * a * (E - w_in) - q * b * (N - S) - pg)
     if t == OUTLET:
-        return 0.25 * (2 * W + N + S - q * b * (N - S))
+        return 0.25 * (2 * W + N + S - q * b * (N - S) - pg)
     if t == FLOOR:
-        return 0.25 * (E + W + N - q * a * (E - W) - q * b * N)
+        return 0.25 * (E + W + N - q * a * (E - W) - q * b * N - pg)
     if t == CEILING:
-        return 0.25 * (E + W + S - q * a * (E - W) + q * b * S)
+        return 0.25 * (E + W + S - q * a * (E - W) + q * b * S - pg)
     if t == INLET_FLOOR:
-        return 0.25 * (E + w_in + N - q * a * (E - w_in) - q * b * N)
+        return 0.25 * (E + w_in + N - q * a * (E - w_in) - q * b * N - pg)
     if t == INLET_CEILING:
-        return 0.25 * (E + w_in + S - q * a * (E - w_in) + q * b * S)
+        return 0.25 * (E + w_in + S - q * a * (E - w_in) + q * b * S - pg)
     if t == OUTLET_FLOOR:
-        return 0.25 * (2 * W + N - q * b * N)
-    return 0.25 * (2 * W + S + q * b * S)           # OUTLET_CEILING
+        return 0.25 * (2 * W + N - q * b * N - pg)
+    return 0.25 * (2 * W + S + q * b * S - pg)      # OUTLET_CEILING
 
 
 class ChannelFlowSolver:
     """
     Steady 2-D incompressible channel flow (Landau & Paez, eqs. 4.60-4.61) on an
-    nx x ny mesh of square cells of side h, with constant pressure (dP = 0):
+    nx x ny mesh of square cells of side h, with constant pressure (dP = 0; optionally a uniform
+    gradient dP/dx, whose term is pg in `cell_equation`):
 
         nu (d2v/dx2 + d2v/dy2) = vx dv/dx + vy dv/dy      for v = vx and v = vy
 
@@ -174,15 +192,16 @@ class ChannelFlowSolver:
             return self.residual
         p = self.p
         q = self.h / (2.0 * p.nu)
+        pgx = self.h * self.h / (p.nu * p.rho) * p.dpdx       # pressure term of the vx equation
         max_r = 0.0
         for j in range(self.ny):
             for i in range(self.nx):
                 t = self.types[j][i]
                 # vx first, then vy, each with the most recent values (including the ones
                 # just updated in this sweep).
-                for f, w_in in ((self.vx, p.inlet_vx), (self.vy, 0.0)):
+                for f, w_in, pg in ((self.vx, p.inlet_vx, pgx), (self.vy, 0.0, 0.0)):
                     E, W, N, S = self._neighbours(f, i, j)
-                    new = cell_equation(t, q, E, W, N, S, self.vx[j][i], self.vy[j][i], w_in)
+                    new = cell_equation(t, q, E, W, N, S, self.vx[j][i], self.vy[j][i], w_in, pg)
                     r = new - f[j][i]
                     max_r = max(max_r, abs(r))
                     f[j][i] += p.omega * r
@@ -192,8 +211,21 @@ class ChannelFlowSolver:
             self.diverged = True
         return max_r
 
+    def live_data(self):
+        """Quantities shown while the method iterates (flows are per metre of depth, in m^2/s)."""
+        h = self.h
+        flow_in = sum(row[0] for row in self.vx) * h                  # through the first column of cells
+        flow_out = sum(row[self.nx - 1] for row in self.vx) * h       # through the last column
+        vmax = max(math.hypot(self.vx[j][i], self.vy[j][i]) for j in range(self.ny) for i in range(self.nx))
+        reach = 0.0
+        for i in range(self.nx - 1, -1, -1):
+            if any(math.hypot(self.vx[j][i], self.vy[j][i]) >= REACH_SPEED for j in range(self.ny)):
+                reach = (i + 1) * h                                   # x up to which the flow has arrived
+                break
+        return {"flow_in": flow_in, "flow_out": flow_out, "vmax": vmax, "reach": reach}
+
     def sample(self):
-        return {
+        return {**self.live_data(),
             "iteration": self.iteration,
             "residual": self.residual if math.isfinite(self.residual) else None,
             "converged": self.converged,
@@ -217,7 +249,12 @@ class ChannelFlowSolver:
             "width": self.p.width,
             "block": self.p.block,
             "nu": self.p.nu,
+            "rho": self.p.rho,
+            "dpdx": self.p.dpdx,
             "inlet_vx": self.p.inlet_vx,
+            # Reference speed of the colour scale: the inlet speed or, with a pressure gradient, the
+            # peak of the plane Poiseuille profile it would drive (-dpdx W^2 / (8 nu rho)).
+            "vref": max(self.p.inlet_vx, abs(self.p.dpdx) * self.p.width ** 2 / (8 * self.p.nu * self.p.rho)),
             "types": self.types,
             "type_names": {str(k): v for k, v in TYPE_NAMES.items()},
             "type_counts": {str(k): counts[k] for k in sorted(counts)},

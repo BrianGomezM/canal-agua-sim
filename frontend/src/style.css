@@ -38,6 +38,8 @@ button {
   padding: 8px 10px; border-radius: 8px; cursor: pointer;
 }
 button:hover { background: #1b3550; }
+button:disabled { opacity: .4; cursor: default; }
+button:disabled:hover { background: #14263a; }
 button.active { background: #24527a; }
 .metric { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 8px; }
 .metric div { padding: 8px; border-radius: 8px; background: #0e1c2b; }

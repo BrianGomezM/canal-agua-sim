@@ -26,8 +26,9 @@ const DIVERGING = ['#2a5db0', '#9fc5e8', '#f4f4f4', '#f0a98a', '#c0392b'];
 const WATER_RAMP = ['#5fb4d6', '#3e9ccb', '#2a86bd', '#1f6fae', '#17599a']; // slow -> fast, all water-like
 const RELIEF_HEAT = 14;    // height (scene units) of a cell at full speed when "relieve" is on
 const BASE_CANAL = 2.5;    // level of the fluid surface where the fluid has arrived
-const WET_LO = 0.02, WET_HI = 0.03; // |V| [m/s] below WET_LO the flow has not reached a point; above WET_HI it has
+const WET_LO = 0.02, WET_HI = 0.03; // |V| [m/s]: below WET_LO the flow has not reached a point, above WET_HI it has
 const WAVE_AMP = 1.4;      // height of the waves at full speed when "relieve" is on (exaggerated)
+const FRONT_SCALE = 40;    // the water front advances 40 m per second for every m/s of computed flow
 const FLOW_SCALE = 12;     // time acceleration of the surface ripples: 1 m/s moves them 12 m per second
 const HEAT_BG = 0x0b1522;
 const CANAL_BG = 0xeef3f7;
@@ -36,75 +37,69 @@ const app = document.querySelector('#app');
 app.innerHTML = `
 <div class="panel">
   <h1>Canal 2D — Navier–Stokes</h1>
-  <div class="subtitle">Ecuaciones 4.60 y 4.61 · diferencias finitas centradas · relajación sucesiva</div>
-
-  <div class="section">
-    <div class="row">
-      <button id="pause">Pausar</button>
-      <button id="step">Paso</button>
-      <button id="reset">Reiniciar</button>
-    </div>
-    <div class="help" id="meshInfo" style="margin-top:8px"></div>
-
-    <label>Factor de relajación ω: <b id="omegaV">0.80</b></label>
-    <input id="omega" type="range" min="0.1" max="1.9" step="0.05" value="0.8">
-    <div class="help" id="omegaHelp"></div>
-
-    <label>Tolerancia (máx. cambio por barrido)</label>
-    <select id="tol">
-      <option value="1e-3">1e-3</option>
-      <option value="1e-4">1e-4</option>
-      <option value="1e-5">1e-5</option>
-      <option value="1e-6" selected>1e-6</option>
-      <option value="1e-8">1e-8</option>
-      <option value="1e-10">1e-10</option>
-    </select>
-
-    <label>Valor inicial de vx (al reiniciar)</label>
-    <select id="initial">
-      <option value="0" selected>0 — el flujo entra al canal</option>
-      <option value="1">1 — el del informe (todo el canal)</option>
-    </select>
-
-    <label>Velocidad de la animación: <b id="sweepsV">40</b> iteraciones/s</label>
-    <input id="sweeps" type="range" min="5" max="240" step="5" value="40">
-    <div class="help">Al arrancar se ve cómo converge el método (iteraciones); no es el paso del tiempo,
-      porque el modelo es estacionario. Cuando converge, el campo ya no cambia.</div>
-  </div>
-
-  <div class="section">
-    <label>Estilo de vista</label>
-    <select id="style">
-      <option value="heat" selected>Mapa de calor</option>
-      <option value="canal">Canal 3D (fluido)</option>
-    </select>
-    <label>Mostrar</label>
-    <select id="view">
-      <option value="speed">Velocidad |V|</option>
-      <option value="vx">Componente vx</option>
-      <option value="vy">Componente vy</option>
-      <option value="type">Tipo de celda (9 tipos)</option>
-    </select>
-    <div class="legend"><div id="legendBar" class="legend-bar"></div>
-      <div class="legend-labels"><span id="legendMin">0</span><span id="legendMax">1</span></div></div>
-    <div class="row" style="margin-top:8px; flex-wrap:wrap">
-      <label class="check"><input type="checkbox" id="vectors" checked> Vectores</label>
-      <label class="check"><input type="checkbox" id="relief"> Relieve</label>
-      <label class="check"><input type="checkbox" id="grid"> Malla</label>
-    </div>
-    <div class="help" id="styleHelp"></div>
-  </div>
+  <div class="subtitle" id="meshInfo"></div>
 
   <div class="section">
     <div class="badge" id="status">Conectando...</div>
     <div class="metric">
       <div><span>Iteración</span><strong id="iter">0</strong></div>
       <div><span>Máx. cambio (residuo)</span><strong id="resid">—</strong></div>
+      <div><span>Caudal entrada (m²/s)</span><strong id="qin">—</strong></div>
+      <div><span>Caudal salida (m²/s)</span><strong id="qout">—</strong></div>
+      <div><span>Salida / entrada</span><strong id="qratio">—</strong></div>
+      <div><span>Alcance del flujo</span><strong id="reach">—</strong></div>
+      <div><span>Velocidad máxima</span><strong id="vmax">—</strong></div>
+      <div><span>Re de celda</span><strong id="reh">—</strong></div>
       <div><span>Malla</span><strong id="meshDims">—</strong></div>
       <div><span>Incógnitas</span><strong id="unknowns">—</strong></div>
-      <div><span>Paso h</span><strong id="hval">—</strong></div>
-      <div><span>Re de celda (|v| = 1)</span><strong id="reh">—</strong></div>
     </div>
+    <div class="row" style="margin-top:10px">
+      <button id="pause">Pausar</button>
+      <button id="reset">Reiniciar</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <b style="font-size:12px">Modelo</b> <span class="help">(se reinicia al cambiar)</span>
+    <label>Viscosidad ν: <b id="nuV">1.0</b> m²/s</label>
+    <input id="nu" type="range" min="0.5" max="10" step="0.5" value="1">
+    <label>Velocidad de entrada: <b id="inletV">1.00</b> m/s</label>
+    <input id="inlet" type="range" min="0.25" max="2" step="0.25" value="1">
+    <label>Gradiente de presión ∂P/∂x: <b id="dpdxV">0.0</b> Pa/m</label>
+    <input id="dpdx" type="range" min="-8" max="0" step="0.5" value="0">
+    <button id="report" style="margin-top:8px" title="ν = 1 m²/s, entrada 1 m/s, presión constante">Valores del informe</button>
+  </div>
+
+  <div class="section">
+    <b style="font-size:12px">Método</b>
+    <label>Factor de relajación ω: <b id="omegaV">0.80</b></label>
+    <input id="omega" type="range" min="0.1" max="1.9" step="0.05" value="0.8">
+    <div class="help" id="omegaHelp"></div>
+    <label>Velocidad: <b id="sweepsV">40</b> iteraciones/s</label>
+    <input id="sweeps" type="range" min="5" max="240" step="5" value="40">
+  </div>
+
+  <div class="section">
+    <b style="font-size:12px">Vista</b>
+    <select id="style">
+      <option value="heat" selected>Mapa de calor</option>
+      <option value="canal">Canal 3D</option>
+    </select>
+    <label>Mostrar</label>
+    <select id="view">
+      <option value="speed">Velocidad |V|</option>
+      <option value="vx">Componente vx</option>
+      <option value="vy">Componente vy</option>
+      <option value="type">Tipo de celda</option>
+    </select>
+    <div class="legend"><div id="legendBar" class="legend-bar"></div>
+      <div class="legend-labels"><span id="legendMin">0</span><span id="legendMax">1</span></div></div>
+    <div class="row" style="margin-top:10px; flex-wrap:wrap; gap:10px">
+      <label class="check"><input type="checkbox" id="vectors" checked> Vectores</label>
+      <label class="check"><input type="checkbox" id="relief"> Relieve</label>
+      <label class="check"><input type="checkbox" id="grid"> Malla</label>
+    </div>
+    <button id="center" style="margin-top:10px" title="Vuelve a encuadrar el canal completo">Centrar vista</button>
   </div>
 
   <div class="section">
@@ -114,7 +109,7 @@ app.innerHTML = `
 
   <div class="section">
     <b style="font-size:12px">Puntero de consulta</b>
-    <div class="help">Pase el cursor sobre una celda del canal: se marca en amarillo y aquí aparecen sus datos.</div>
+    <div class="help">Pase el cursor sobre el canal para cambiar de celda; sus valores se actualizan en cada iteración.</div>
     <div class="metric">
       <div><span>celda (i, j)</span><strong id="pc">—</strong></div>
       <div><span>tipo</span><strong id="pt">—</strong></div>
@@ -123,16 +118,8 @@ app.innerHTML = `
       <div><span>vx</span><strong id="pu">—</strong></div>
       <div><span>vy</span><strong id="pv">—</strong></div>
       <div><span>|V|</span><strong id="ps">—</strong></div>
+      <div><span>sustitución</span><strong id="prule">—</strong></div>
     </div>
-  </div>
-
-  <div class="section help">
-    <b>Modelo:</b> flujo estacionario, incompresible y bidimensional en un canal de 400 × 40 m, sin
-    obstáculos, con presión constante (∂P = 0), ν = 1 m²/s. Entrada: vx = 1, vy = 0. Piso y techo:
-    v = 0. Salida: ∂v/∂x = 0 (E = W). Cada celda se calcula con sus cuatro vecinas (ecuaciones del
-    informe); el sistema no lineal se resuelve iterando hasta que el cambio sea menor que la
-    tolerancia. La continuidad (4.59) no se impone en esta etapa, y con presión constante el flujo
-    se frena y llega a cero antes de la salida.
   </div>
 </div>
 <div id="tooltip"></div>
@@ -161,14 +148,44 @@ function makeLUT(stops) {
 const LUTS = { heat: makeLUT(RAMP), diverging: makeLUT(DIVERGING), water: makeLUT(WATER_RAMP) };
 
 // ---------- fluid surface shaders ----------
-// The velocity texture holds (vx, vy, |V|, wetness) per cell. The surface is flat at a base level
-// where the computed flow has arrived (wetness = 1) and dry elsewhere. A ripple pattern is carried
+// The velocity texture holds (vx, vy, |V|) per cell. The surface is flat at a base level where the
+// computed flow has arrived (|V| above a threshold, on a smoothly interpolated field) and dry elsewhere. A ripple pattern is carried
 // by the local velocity (two-phase "flow map"), so the surface visibly flows where the computed
 // velocity is non-zero and is calm where it is zero. With "relieve" on, the ripples also lift the
 // surface: waves that are taller where the flow is faster.
 const FLUID_COMMON = `
   uniform float uTime;
   uniform float uFlow;
+  uniform sampler2D uVel;   // (vx, vy, |V|) per cell
+  uniform vec2 uTexSize;    // cells along x and y
+  uniform float uWetLo;     // |V| [m/s] below which the flow has not reached a point
+  uniform float uWetHi;     // |V| [m/s] above which it has
+  uniform sampler2D uFront; // per row of cells: x [m] up to which the fluid has arrived
+  uniform float uLength;    // channel length [m]
+
+  // 1 behind the advancing front, 0 ahead of it (the front is carried by the computed velocity).
+  float arrivedAt(vec2 uv) {
+    float xf = texture2D(uFront, vec2(0.5, uv.y)).r;
+    return 1.0 - smoothstep(xf - 2.0, xf, uv.x * uLength);
+  }
+
+  // Cubic B-spline interpolation of the velocity texture (4 bilinear taps). The 80 x 8 mesh is
+  // coarse: with plain bilinear filtering the edge of the water follows the cells and shows steps.
+  vec4 sampleVel(vec2 uv) {
+    vec2 coord = uv * uTexSize - 0.5;
+    vec2 f = fract(coord);
+    coord -= f;
+    vec2 f2 = f * f, f3 = f2 * f;
+    vec2 w0 = (-f3 + 3.0 * f2 - 3.0 * f + 1.0) / 6.0;
+    vec2 w1 = (3.0 * f3 - 6.0 * f2 + 4.0) / 6.0;
+    vec2 w2 = (-3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0) / 6.0;
+    vec2 w3 = f3 / 6.0;
+    vec2 g0 = w0 + w1, g1 = w2 + w3;
+    vec2 h0 = (coord - 0.5 + w1 / g0) / uTexSize;
+    vec2 h1 = (coord + 1.5 + w3 / g1) / uTexSize;
+    return g0.y * (g0.x * texture2D(uVel, vec2(h0.x, h0.y)) + g1.x * texture2D(uVel, vec2(h1.x, h0.y)))
+         + g1.y * (g0.x * texture2D(uVel, vec2(h0.x, h1.y)) + g1.x * texture2D(uVel, vec2(h1.x, h1.y)));
+  }
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float noise(vec2 p) {
@@ -190,9 +207,7 @@ const FLUID_COMMON = `
 `;
 const FLUID_VERT = `
   ${FLUID_COMMON}
-  uniform sampler2D uVel;
   uniform vec2 uSize;      // channel length and width [m]
-  uniform vec2 uTexSize;   // cells along x and y
   uniform float uRelief;   // 1 = waves lift the surface
   uniform float uWaveAmp;  // wave height at full speed
   uniform float uBase;     // level of the surface where the fluid has arrived
@@ -201,16 +216,18 @@ const FLUID_VERT = `
   varying vec3 vWorld;
   varying vec3 vNormal;
 
+  // Wetness 0..1: 0 where the flow has not arrived (speed too low, or the front has not got there yet).
+  float wetAt(vec2 uv) { return smoothstep(uWetLo, uWetHi, sampleVel(uv).z) * arrivedAt(uv); }
   // Base level of the surface: 0 (floor) where the flow has not arrived, uBase where it has.
-  float surfaceAt(vec2 uv) { return smoothstep(0.0, 1.0, texture2D(uVel, uv).w) * uBase; }
+  float surfaceAt(vec2 uv) { return wetAt(uv) * uBase; }
 
   void main() {
     vUv = uv;
-    vec4 v = texture2D(uVel, uv);
+    vec4 v = sampleVel(uv);
     vec3 pos = position;
     float moving = smoothstep(0.0, 0.12, v.z / uInlet);   // calm where the flow stops
     float wave = uRelief * uWaveAmp * moving * (flowPattern(pos.xz, vec2(v.x, -v.y)) - 0.5);
-    pos.y += 0.15 + surfaceAt(uv) + smoothstep(0.0, 1.0, v.w) * wave;
+    pos.y += 0.15 + surfaceAt(uv) + wetAt(uv) * wave;
     vec2 du = vec2(1.0 / uTexSize.x, 0.0);
     vec2 dv = vec2(0.0, 1.0 / uTexSize.y);
     float hx = surfaceAt(uv + du) - surfaceAt(uv - du);
@@ -224,7 +241,6 @@ const FLUID_VERT = `
 `;
 const FLUID_FRAG = `
   ${FLUID_COMMON}
-  uniform sampler2D uVel;
   uniform sampler2D uColor;
   uniform float uInlet;
   varying vec2 vUv;
@@ -232,8 +248,9 @@ const FLUID_FRAG = `
   varying vec3 vNormal;
 
   void main() {
-    vec4 v = texture2D(uVel, vUv);
-    if (v.w < 0.02) discard;                    // dry: the computed flow has not reached this point
+    vec4 v = sampleVel(vUv);
+    float wet = smoothstep(uWetLo, uWetHi, v.z) * arrivedAt(vUv);
+    if (wet < 0.02) discard;                    // dry: the computed flow has not reached this point
     vec2 vel = vec2(v.x, -v.y);                 // world (x, z); z = width/2 - y
     vec2 p = vWorld.xz;
     float n = flowPattern(p, vel);
@@ -247,7 +264,7 @@ const FLUID_FRAG = `
     vec3 col = base * diff + moving * (n - 0.5) * 0.14;
     float glint = pow(max(dot(reflect(-L, N), normalize(cameraPosition - vWorld)), 0.0), 40.0);
     col += moving * 0.4 * glint;
-    col = mix(vec3(0.95, 0.98, 1.0), col, smoothstep(0.02, 0.5, v.w));   // thin foam line at the front
+    col = mix(vec3(0.95, 0.98, 1.0), col, smoothstep(0.02, 0.4, wet));   // thin foam line at the front
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
   }
@@ -270,6 +287,9 @@ const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 30
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI / 2 - 0.35;   // the camera stays at least ~20 degrees above the channel: never under it or edge-on
+controls.minDistance = 30;
+controls.maxDistance = 1600;
 
 const CHANNEL_SPAN = 460;                                       // channel length + inlet/outlet arrows [m]
 const HEAT_DIR = new THREE.Vector3(0, 0.9, 0.44).normalize();   // camera direction from the target
@@ -285,19 +305,24 @@ let canal = null;        // canal: group with floor, walls and the fluid surface
 let water = null;        // canal: the fluid surface mesh
 let gridLines = null;    // cell borders
 let hover = null;        // marker of the cell under the pointer
-let colorTex = null, velTex = null;
+let colorTex = null, velTex = null, frontTex = null;
+let front = null;        // per row of cells: x [m] up to which the fluid has arrived (grows from the inlet)
 // Velocity shown = eased towards the last solver state, so cells rise/fall smoothly.
 let tgtVx = null, tgtVy = null, curVx = null, curVy = null;
 let dirty = true;
+// Cell (i, j) shown in the panel and the tooltip; its values follow the solver. It starts on a cell near
+// the inlet, so the panel is never empty, and then keeps the last cell the cursor went over.
+let inspected = { i: 10, j: 3 };
+let snapNext = true;      // the next solver state is shown as is, without easing from the previous one
 let flowTime = 0;
-let running = true;
 let socket = null;
 let lastSend = 0;
 const dummy = new THREE.Object3D();
 
 // The control panel covers the left of the screen: shift the rendered image to the right by
 // half of the panel width and back the camera off until the whole channel fits in the free area.
-function fitView() {
+function fitView(recenter = false) {
+  if (recenter) controls.target.set(0, 0, 0);   // also drops any pan made with the mouse
   const panel = document.querySelector('.panel');
   const panelW = panel ? panel.offsetWidth + 16 : 0;
   camera.aspect = innerWidth / innerHeight;
@@ -329,6 +354,7 @@ function buildScene() {
   for (const o of [cells, arrows, frame, canal, gridLines, hover]) disposeObject(o);
   colorTex?.dispose();
   velTex?.dispose();
+  frontTex?.dispose();
   const { nx, ny, h } = mesh;
   const n = nx * ny;
 
@@ -379,6 +405,10 @@ function buildScene() {
   velTex = new THREE.DataTexture(new Uint16Array(n * 4), nx, ny, THREE.RGBAFormat, THREE.HalfFloatType);
   for (const t of [colorTex, velTex]) { t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearFilter; }
   colorTex.colorSpace = THREE.SRGBColorSpace;
+  frontTex = new THREE.DataTexture(new Uint16Array(ny * 4), 1, ny, THREE.RGBAFormat, THREE.HalfFloatType);
+  frontTex.magFilter = THREE.LinearFilter;
+  frontTex.minFilter = THREE.LinearFilter;
+  front = new Float32Array(ny);                     // the fluid starts at the inlet: the channel is empty
   water = new THREE.Mesh(
     new THREE.PlaneGeometry(mesh.length, mesh.width, Math.min(400, nx * 4), Math.min(160, ny * 4)).rotateX(-Math.PI / 2),
     new THREE.ShaderMaterial({
@@ -389,7 +419,8 @@ function buildScene() {
         uSize: { value: new THREE.Vector2(mesh.length, mesh.width) },
         uTexSize: { value: new THREE.Vector2(nx, ny) },
         uRelief: { value: 0 }, uWaveAmp: { value: WAVE_AMP }, uBase: { value: BASE_CANAL },
-        uInlet: { value: mesh.inlet_vx }, uFlow: { value: FLOW_SCALE },
+        uInlet: { value: mesh.vref }, uFlow: { value: FLOW_SCALE }, uWetLo: { value: WET_LO }, uWetHi: { value: WET_HI },
+        uFront: { value: frontTex }, uLength: { value: mesh.length },
       },
     }));
   canal.add(water);
@@ -426,12 +457,9 @@ function buildScene() {
   tgtVx = new Float32Array(n); tgtVy = new Float32Array(n);
   curVx = new Float32Array(n); curVy = new Float32Array(n);
 
-  el('meshDims').textContent = `${nx} × ${ny}`;
+  el('meshInfo').textContent = `Malla fija del informe: ${nx} × ${ny} celdas de ${h} m (canal de ${mesh.length} × ${mesh.width} m)`;
+  el('meshDims').textContent = `${nx} × ${ny} · h = ${h} m`;
   el('unknowns').textContent = mesh.unknowns.toLocaleString('es');
-  el('hval').textContent = `${h} m`;
-  el('reh').textContent = (h * mesh.inlet_vx / mesh.nu).toFixed(1);
-  el('meshInfo').innerHTML = `<b>Malla fija del informe:</b> ${nx} × ${ny} celdas de ${h} m (canal de ${mesh.length} × ${mesh.width} m), `
-    + `${nx * ny} celdas × 2 componentes = ${mesh.unknowns.toLocaleString('es')} incógnitas.`;
 
   const rows = Object.entries(mesh.type_names).map(([t, name]) =>
     `<tr><td><span class="sw" style="background:#${TYPE_COLORS[t].toString(16).padStart(6, '0')}"></span></td>`
@@ -441,8 +469,17 @@ function buildScene() {
   applyStyle(true);
 }
 
+// Back to an empty channel (the mesh does not change): no field yet and the fluid has not entered.
+function resetField() {
+  for (const a of [tgtVx, tgtVy, curVx, curVy, front]) a.fill(0);
+  snapNext = true;
+  frontTex.image.data.fill(0);
+  frontTex.needsUpdate = true;
+  dirty = true;
+}
+
 function range(view) {
-  const ref = mesh ? mesh.inlet_vx : 1;
+  const ref = mesh ? mesh.vref : 1;
   return view === 'vy' ? [-0.1 * ref, 0.1 * ref] : [0, ref];
 }
 
@@ -473,9 +510,6 @@ function applyStyle(refit = false) {
     gridLines.position.y = heat ? 0.95 : BASE_CANAL + 0.35;
     gridLines.material.color.setHex(heat ? 0xffffff : 0x0b2a4a);
   }
-  el('styleHelp').textContent = heat
-    ? 'Una caja por celda de la malla. Relieve: la altura crece con |V| y las cajas suben y bajan a medida que converge el método.'
-    : 'El canal empieza vacío: el agua aparece donde el flujo calculado llega (|V| ≥ 0.03 m/s), con un frente que avanza desde la entrada, y queda seco donde el flujo se detiene (con este modelo, pasados ≈ 220 m). Las ondas se desplazan con la velocidad calculada (tiempo acelerado ×12). Relieve: oleaje que se desplaza, más alto donde el flujo es más rápido y en calma donde v = 0 (exagerado).';
   updateLegend();
   if (refit) fitView();
   dirty = true;
@@ -492,6 +526,10 @@ function paint(data) {
       tgtVy[j * nx + i] = clamp(data.vy[j][i]);
     }
   }
+  if (snapNext) {   // first state after a reset: show it exactly (the initial guess), not a fade-in from zero
+    curVx.set(tgtVx); curVy.set(tgtVy);
+    snapNext = false; dirty = true;
+  }
 }
 
 // Draws the current (eased) field in the active style.
@@ -503,7 +541,7 @@ function renderField() {
   const [lo, hi] = range(view);
   const relief = el('relief').checked;
   const lut = currentLUT(view);
-  const inlet = mesh.inlet_vx;
+  const inlet = mesh.vref;
   const texColor = heat ? null : colorTex.image.data;
   const texVel = heat ? null : velTex.image.data;
   const toHalf = THREE.DataUtils.toHalfFloat;
@@ -540,10 +578,10 @@ function renderField() {
         }
         texColor[4 * k + 3] = 255;
         texVel[4 * k] = toHalf(vx); texVel[4 * k + 1] = toHalf(vy); texVel[4 * k + 2] = toHalf(sp);
-        texVel[4 * k + 3] = toHalf(Math.min(1, Math.max(0, (sp - WET_LO) / (WET_HI - WET_LO)))); // wetness: 1 where the flow has arrived
+        texVel[4 * k + 3] = toHalf(1);
       }
 
-      const shown = heat || sp >= WET_LO;  // no vectors over dry (not yet reached) cells
+      const shown = heat || (sp >= WET_LO && (i + 0.5) * mesh.h <= front[j]);  // no vectors over dry (not yet reached) cells
       dummy.position.set(x, top + 0.5, z);
       dummy.rotation.set(0, Math.atan2(vy, vx), 0);
       dummy.scale.setScalar(shown && s > 0.02 ? 0.25 + 0.75 * s : 0.0001);
@@ -562,6 +600,22 @@ function renderField() {
   }
 }
 
+// Advances the water front of each row with the computed velocity under it, so the fluid enters from
+// the inlet and stalls where the flow dies out.
+function advanceFront(dt) {
+  if (!front || !curVx) return;
+  const { nx, ny, h, length } = mesh;
+  const data = frontTex.image.data, toHalf = THREE.DataUtils.toHalfFloat;
+  let moving = false;
+  for (let j = 0; j < ny; j++) {
+    const i = Math.min(nx - 1, Math.floor(front[j] / h));
+    const step = Math.max(0, curVx[j * nx + i]) * dt * FRONT_SCALE;
+    if (step > 1e-3 && front[j] < length) { front[j] = Math.min(length, front[j] + step); moving = true; }
+    data[4 * j] = toHalf(front[j]);
+  }
+  if (moving) { frontTex.needsUpdate = true; dirty = true; }
+}
+
 // Moves the shown velocities towards the solver state; re-renders only while something changes.
 function easeField(dt) {
   if (!curVx) return;
@@ -575,15 +629,52 @@ function easeField(dt) {
   if (moving || dirty) { renderField(); dirty = false; }
 }
 
+// The button follows the state reported by the server: Pausar/Reanudar while the method runs or is
+// paused, and disabled once it has converged or diverged (use Reiniciar).
+function updateRunButtons(data) {
+  const finished = data.converged || data.diverged;
+  el('pause').disabled = finished;
+  el('pause').textContent = data.running ? 'Pausar' : 'Reanudar';
+}
+
+// Fills the panel and the tooltip with the current values of the inspected cell.
+function updateInspector() {
+  if (!inspected || !latest || !mesh) return;
+  const { i, j } = inspected;
+  const vx = latest.vx[j][i], vy = latest.vy[j][i], sp = Math.hypot(vx, vy);
+  const type = mesh.types[j][i];
+  const x = ((i + 0.5) * mesh.h).toFixed(1), y = ((j + 0.5) * mesh.h).toFixed(1);
+  el('pc').textContent = `(${i}, ${j})`;
+  el('pt').textContent = `${type} · ${mesh.type_names[type]}`;
+  el('px').textContent = `${x} m`;
+  el('py').textContent = `${y} m`;
+  el('pu').textContent = vx.toFixed(4);
+  el('pv').textContent = vy.toFixed(4);
+  el('ps').textContent = sp.toFixed(4);
+  el('prule').textContent = TYPE_RULES[type];
+  el('tooltip').innerHTML = `<b>Celda (${i}, ${j})</b> · tipo ${type}: ${mesh.type_names[type]}<br>`
+    + `centro: x = ${x} m, y = ${y} m<br>`
+    + `sustitución: ${TYPE_RULES[type]}<br>`
+    + `vx = ${vx.toFixed(4)} m/s · vy = ${vy.toFixed(4)} m/s<br>|V| = ${sp.toFixed(4)} m/s`;
+}
+
 function showState(data) {
   latest = data;
+  updateInspector();
+  updateRunButtons(data);
   paint(data);
   el('iter').textContent = data.iteration.toLocaleString('es');
   el('resid').textContent = data.residual === null ? '—' : data.residual.toExponential(2);
+  el('qin').textContent = data.flow_in.toFixed(1);
+  el('qout').textContent = data.flow_out.toFixed(1);
+  el('qratio').textContent = data.flow_in > 0.01 ? `${(100 * data.flow_out / data.flow_in).toFixed(0)} %` : '—';
+  el('reach').textContent = `${data.reach.toFixed(0)} m`;
+  el('vmax').textContent = `${data.vmax.toFixed(3)} m/s`;
+  el('reh').textContent = cellRe().toFixed(1);
   const st = el('status');
-  if (data.diverged) { st.textContent = 'Divergió: reduzca ω y reinicie'; st.className = 'badge bad'; }
-  else if (data.converged) { st.textContent = `Convergió (residuo < ${data.tol.toExponential(0)})`; st.className = 'badge ok'; }
-  else if (!running) { st.textContent = 'En pausa'; st.className = 'badge warning'; }
+  if (data.diverged) { st.textContent = 'Divergió: baje ω, suba ν o baje la entrada'; st.className = 'badge bad'; }
+  else if (data.converged) { st.textContent = 'Convergió'; st.className = 'badge ok'; }
+  else if (!data.running) { st.textContent = 'En pausa'; st.className = 'badge warning'; }
   else { st.textContent = 'Iterando…'; st.className = 'badge'; }
 }
 
@@ -595,18 +686,38 @@ function send(type, params = {}) {
 
 function currentParams() {
   return {
-    omega: +el('omega').value, tol: +el('tol').value,
-    initial_vx: +el('initial').value, sweeps_per_second: +el('sweeps').value,
+    omega: +el('omega').value, sweeps_per_second: +el('sweeps').value,
+    nu: +el('nu').value, inlet_vx: +el('inlet').value, dpdx: +el('dpdx').value,
   };
 }
 
+// Cell Reynolds number h * Vref / nu, from the sliders (Vref: inlet speed or the Poiseuille peak).
+function cellRe() {
+  const h = mesh ? mesh.h : 5, width = mesh ? mesh.width : 40, rho = mesh ? mesh.rho : 1000;
+  const nu = +el('nu').value, inlet = +el('inlet').value, dpdx = +el('dpdx').value;
+  return h * Math.max(inlet, Math.abs(dpdx) * width * width / (8 * nu * rho)) / nu;
+}
+
+// Advice on omega from the cell Reynolds number (measured: Re = 5 converges up to omega 0.9; Re <= 2.5
+// up to at least 1.4; Re >= 7.5 diverged in every case tried).
 function updateOmegaHelp() {
-  const om = +el('omega').value;
-  el('omegaHelp').textContent = om >= 0.95
-    ? 'Con esta malla (80 × 8, Re de celda = 5) el método no converge para ω ≥ 0.95 (diverge o el residuo no baja), incluido ω = 1 y la sobrerrelajación ω > 1.'
-    : 'ω < 1: subrelajación. Con esta malla converge para ω ≤ 0.9 (lo más rápido cerca de 0.85).';
+  const re = cellRe();
+  const advice = re > 6 ? 'Muy alto: puede divergir; suba ν o baje la velocidad de entrada.'
+    : re >= 4 ? 'Alto: use ω < 1 (con Re = 5 converge hasta 0.9).'
+    : re <= 2.5 ? 'Bajo: admite sobrerrelajación (ω > 1, probado hasta 1.4).'
+    : 'Intermedio.';
+  el('omegaHelp').textContent = `Re de celda ${re.toFixed(1)}. ${advice}`;
 }
 updateOmegaHelp();
+
+for (const [id, out, fmt] of [['nu', 'nuV', v => v.toFixed(1)], ['inlet', 'inletV', v => v.toFixed(2)], ['dpdx', 'dpdxV', v => v.toFixed(1)]]) {
+  el(id).addEventListener('input', () => { el(out).textContent = fmt(+el(id).value); updateOmegaHelp(); });
+  el(id).addEventListener('change', () => restart());    // a model variable changes the equations: start again
+}
+el('report').onclick = () => {                            // the report's values
+  for (const [id, v] of [['nu', 1], ['inlet', 1], ['dpdx', 0]]) { el(id).value = v; el(id).dispatchEvent(new Event('input')); }
+  restart();
+};
 
 el('omega').addEventListener('input', () => {
   el('omegaV').textContent = (+el('omega').value).toFixed(2);
@@ -614,20 +725,14 @@ el('omega').addEventListener('input', () => {
   if (performance.now() - lastSend > 80) { send('params', { omega: +el('omega').value }); lastSend = performance.now(); }
 });
 el('omega').addEventListener('change', () => send('params', { omega: +el('omega').value }));
-el('tol').addEventListener('change', () => send('params', { tol: +el('tol').value }));
 el('sweeps').addEventListener('input', () => {
   el('sweepsV').textContent = el('sweeps').value;
   send('params', { sweeps_per_second: +el('sweeps').value });
 });
-function restart() { running = true; el('pause').textContent = 'Pausar'; latest = null; send('reset', currentParams()); }
-el('initial').addEventListener('change', restart);
+function restart() { latest = null; send('reset', currentParams()); }
 el('reset').onclick = restart;
-el('pause').onclick = () => {
-  running = !running;
-  el('pause').textContent = running ? 'Pausar' : 'Reanudar';
-  send(running ? 'resume' : 'pause');
-};
-el('step').onclick = () => { running = false; el('pause').textContent = 'Reanudar'; send('step'); };
+el('pause').onclick = () => send(latest && !latest.running ? 'resume' : 'pause');
+el('center').onclick = () => fitView(true);
 el('style').addEventListener('change', () => { style = el('style').value; applyStyle(true); });
 for (const id of ['view', 'vectors', 'relief', 'grid']) el(id).addEventListener('change', () => applyStyle(false));
 updateLegend();
@@ -635,15 +740,21 @@ updateLegend();
 function connect() {
   socket = new WebSocket(API);
   socket.onopen = () => {
-    el('status').textContent = 'Conectado al solver Python';
+    el('status').textContent = 'Conectado';
     el('status').className = 'badge ok';
-    running = true;
-    el('pause').textContent = 'Pausar';
     send('reset', currentParams());
   };
   socket.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'mesh') { latest = null; mesh = msg.data; buildScene(); }
+    if (msg.type === 'mesh') {
+      const same = mesh && msg.data.nx === mesh.nx && msg.data.ny === mesh.ny && msg.data.h === mesh.h;
+      latest = null; mesh = msg.data;
+      if (same && curVx) {
+        resetField();
+        water.material.uniforms.uInlet.value = mesh.vref;
+        updateLegend(); updateOmegaHelp();
+      } else buildScene();
+    }
     else if (msg.type === 'state') showState(msg.data);
     else if (msg.type === 'error') {
       el('status').textContent = `Error: ${msg.message}`;
@@ -669,10 +780,15 @@ function speedAt(i, j) {
   return Math.hypot(curVx[k], curVy[k]);
 }
 
+// True if the fluid has reached cell (i, j): its speed is above the threshold and the front has passed it.
+function reached(i, j, minSpeed) {
+  return speedAt(i, j) >= minSpeed && (i + 0.5) * mesh.h <= front[j];
+}
+
 // Height of the drawn surface over cell (i, j).
 function topAt(i, j) {
-  if (style === 'heat') return el('relief').checked ? 0.4 + RELIEF_HEAT * Math.min(1, speedAt(i, j) / mesh.inlet_vx) : 0.8;
-  return speedAt(i, j) >= WET_HI ? BASE_CANAL : 0.15;
+  if (style === 'heat') return el('relief').checked ? 0.4 + RELIEF_HEAT * Math.min(1, speedAt(i, j) / mesh.vref) : 0.8;
+  return reached(i, j, WET_HI) ? BASE_CANAL : 0.15;
 }
 
 // Cell whose column of the mesh the ray crosses at height y, or null if it is outside the channel.
@@ -693,7 +809,7 @@ function pickCell(e) {
     // The fluid surface is drawn above the floor, so intersect the ray with that level (exact even
     // in an oblique view); over cells the flow has not reached, the visible surface is the floor.
     let cell = cellAtHeight(BASE_CANAL);
-    if (cell && speedAt(cell.i, cell.j) < WET_HI) cell = cellAtHeight(0.15);
+    if (cell && !reached(cell.i, cell.j, WET_HI)) cell = cellAtHeight(0.15);
     return cell;
   }
   const hit = raycaster.intersectObject(cells, false)[0];
@@ -708,29 +824,19 @@ renderer.domElement.addEventListener('pointermove', e => {
   const cell = pickCell(e);
   if (!cell) { tip.style.display = 'none'; hover.visible = false; return; }
   const { i, j } = cell;
-  const vx = latest.vx[j][i], vy = latest.vy[j][i], sp = Math.hypot(vx, vy);
-  const type = mesh.types[j][i];
+  inspected = { i, j };
   const [cx, cz] = cellCenter(i, j);
   hover.position.set(cx, topAt(i, j) + 0.8, cz);
   hover.visible = true;
-  el('pc').textContent = `(${i}, ${j})`;
-  el('pt').textContent = `${type} · ${mesh.type_names[type]}`;
-  el('px').textContent = `${((i + 0.5) * mesh.h).toFixed(1)} m`;
-  el('py').textContent = `${((j + 0.5) * mesh.h).toFixed(1)} m`;
-  el('pu').textContent = vx.toFixed(4);
-  el('pv').textContent = vy.toFixed(4);
-  el('ps').textContent = sp.toFixed(4);
+  updateInspector();
   tip.style.display = 'block';
   tip.style.left = `${Math.min(e.clientX + 14, innerWidth - 230)}px`;
   tip.style.top = `${Math.min(e.clientY + 14, innerHeight - 150)}px`;
-  tip.innerHTML = `<b>Celda (${i}, ${j})</b> · tipo ${type}: ${mesh.type_names[type]}<br>`
-    + `centro: x = ${((i + 0.5) * mesh.h).toFixed(1)} m, y = ${((j + 0.5) * mesh.h).toFixed(1)} m<br>`
-    + `sustitución: ${TYPE_RULES[type]}<br>`
-    + `vx = ${vx.toFixed(4)} m/s · vy = ${vy.toFixed(4)} m/s<br>|V| = ${sp.toFixed(4)} m/s`;
 });
 renderer.domElement.addEventListener('pointerleave', () => { el('tooltip').style.display = 'none'; if (hover) hover.visible = false; });
 
-addEventListener('resize', fitView);
+addEventListener('resize', () => fitView());
+new ResizeObserver(() => fitView()).observe(document.querySelector('.panel'));
 
 let lastFrame = performance.now();
 function animate() {
@@ -740,6 +846,7 @@ function animate() {
   lastFrame = now;
   flowTime += dt;
   if (water) water.material.uniforms.uTime.value = flowTime;
+  advanceFront(dt);
   easeField(dt);
   controls.update();
   renderer.render(scene, camera);

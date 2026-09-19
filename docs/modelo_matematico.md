@@ -66,10 +66,13 @@ Por serie de Taylor, la primera y la segunda derivada centradas tienen error O(h
 Al reemplazarlas en 4.60 y 4.61, multiplicar por h² y despejar la celda central C, con a = vₓ(i, j),
 b = vᵧ(i, j) y q = h/(2ν) (= h/2 = 2.5):
 
-    C = ¼ [E + W + N + S − q·a·(E − W) − q·b·(N − S)]
+    C = ¼ [E + W + N + S − q·a·(E − W) − q·b·(N − S) − p]
 
 En la ecuación de vₓ, C, E, W, N y S son valores de vₓ; en la de vᵧ, valores de vᵧ. Es la ec. 4.64 del libro
-sin el término de presión. Los términos de corrección multiplican velocidades entre sí, así que el sistema es
+con el término de presión p, que en el informe vale 0 (∂P = 0) y por eso la fórmula del informe no lo lleva.
+La aplicación permite un ∂P/∂x constante como variable del modelo; entonces, solo en la ecuación de vₓ,
+p = h²/(ν·ρ) · ∂P/∂x (en la de vᵧ, p = 0 porque ∂P/∂y = 0). Con ∂P/∂x = 0 se recupera exactamente el
+planteamiento del informe. Las 9 ecuaciones de §5.4 llevan el mismo "− p" dentro del corchete. Los términos de corrección multiplican velocidades entre sí, así que el sistema es
 **no lineal**, y la ecuación de vₓ necesita a vᵧ y viceversa (**acoplado**).
 
 ### 5.3 Condiciones de frontera
@@ -110,8 +113,8 @@ implementadas en `cell_equation` ([backend/app/model.py](../backend/app/model.py
 
 Relajación sucesiva (ec. 4.63 del libro), en `ChannelFlowSolver.sweep`:
 
-1. Valor inicial de todas las velocidades (el informe sugiere vₓ = 1 y vᵧ = 0; la interfaz usa vₓ = 0 por
-   defecto, y ambas opciones convergen a la misma solución).
+1. Valor inicial de todas las velocidades: vᵧ = 0 y vₓ = 0 (el informe sugiere vₓ = 1 "por ejemplo"; con
+   vₓ = 1 se llega a la misma solución, y una prueba lo comprueba).
 2. Se recorre la malla; en cada celda se calcula F, el valor que da la ecuación de su tipo con los valores
    más recientes de las vecinas (primero vₓ y luego vᵧ), y se actualiza v ← v + ω·(F − v).
 3. Se repite hasta que el mayor cambio de un barrido sea menor que la tolerancia (10⁻⁶ por defecto). Si un
@@ -144,9 +147,25 @@ los 400 m. Con vᵧ ≡ 0, la continuidad exigiría ∂vₓ/∂x = 0, incompatib
 paredes que frenan el fluido; por eso 4.59 no se impone. Con presión constante nada empuja el fluido, así que
 no llega a la salida.
 
+### Variables del modelo (exploración fuera del informe)
+
+Medido con ω = 0.8 y tolerancia 10⁻⁶ (ν = 1, ρ = 10³, entrada 1 m/s salvo indicación):
+
+| ∂P/∂x (Pa/m) | Resultado |
+|---|---|
+| 0 (informe) | converge en 273 iteraciones, alcance 220 m, caudal de salida ≈ 0 |
+| −1 | converge en 177, alcance 400 m, salida/entrada 20 % |
+| −2 | converge en 96, alcance 400 m, salida/entrada 41 %, vₘₐₓ 1.033 m/s |
+
+Datos en vivo que muestra la interfaz: caudal de entrada y de salida (Σ vₓ·h de la primera y de la última
+columna, m²/s), su relación, alcance (última columna con |V| ≥ 0.03 m/s), vₘₐₓ y Re de celda h·V/ν, con V la
+velocidad de referencia (`vref`: la de entrada, o el máximo del perfil de Poiseuille si ese es mayor). El
+Reynolds de celda decide qué ω sirve: con 5 converge ω ≤ 0.9; con ≤ 2.5 (por ejemplo ν = 4) admite ω = 1.4;
+con ≥ 7.5 divergió en todos los casos probados.
+
 ## 7. Validación
 
-No basta con que "se vea bien". Lo que ya se comprueba (14 pruebas, `python -m unittest discover -s tests`
+No basta con que "se vea bien". Lo que ya se comprueba (19 pruebas, `python -m unittest discover -s tests`
 desde `backend`):
 
 1. **Malla**: 80 × 8 celdas de 5 m, 1 280 incógnitas, celdas por tipo (468, 6, 6, 78, 78, 1, 1, 1, 1) y k
@@ -154,7 +173,11 @@ desde `backend`):
 2. **Las 9 ecuaciones**: coinciden con una implementación independiente que sustituye cada vecina faltante
    por su valor de frontera, en campos aleatorios con velocidades de ambos signos.
 3. **Fronteras**: la ecuación de la salida no depende de E; el valor de entrada entra como vecina W.
-4. **Solver**: converge con ω = 0.8; la solución es simétrica, vᵧ ≡ 0 y 0 ≤ vₓ ≤ 1; no depende del valor
+   El término de presión también se comprueba en las nueve (con p distinto de 0).
+4. **Variables del modelo**: con ∂P/∂x = −2 el flujo llega a la salida; con ν = 4 la sobrerrelajación
+   ω = 1.4 converge; los datos en vivo y `vref` (1.5 m/s para ∂P/∂x = −7.5) son los esperados; los
+   parámetros fuera de rango se rechazan.
+5. **Solver**: converge con ω = 0.8; la solución es simétrica, vᵧ ≡ 0 y 0 ≤ vₓ ≤ 1; no depende del valor
    inicial (diferencia < 10⁻³); para ω = 1 y 1.3 no converge; una corrida divergente sigue siendo finita y
    serializable.
 

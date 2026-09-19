@@ -20,7 +20,7 @@ NX, NY, H, NU = 80, 8, 5.0, 1.0
 Q = H / (2 * NU)   # h/2 = 2.5, the factor of the report
 
 
-def generic_equation(i, j, nx, ny, field, a, b, w_in, q):
+def generic_equation(i, j, nx, ny, field, a, b, w_in, q, pg=0.0):
     """
     Independent implementation: central formula of the report with each missing neighbour
     replaced by the boundary value (inlet W = w_in, floor S = 0, ceiling N = 0, outlet E = W).
@@ -30,7 +30,7 @@ def generic_equation(i, j, nx, ny, field, a, b, w_in, q):
     S = field[(i, j - 1)] if j > 0 else 0.0
     N = field[(i, j + 1)] if j < ny - 1 else 0.0
     E = field[(i + 1, j)] if i < nx - 1 else W
-    return 0.25 * (E + W + N + S - q * a * (E - W) - q * b * (N - S))
+    return 0.25 * (E + W + N + S - q * a * (E - W) - q * b * (N - S) - pg)
 
 
 class MeshTests(unittest.TestCase):
@@ -61,7 +61,8 @@ class MeshTests(unittest.TestCase):
 
     def test_relaxation_parameters_are_validated(self):
         for kwargs in ({"omega": 0.0}, {"omega": 2.0}, {"omega": -1.0}, {"tol": 0.0},
-                       {"initial_vx": -0.1}, {"initial_vx": 1.5}, {"sweeps_per_second": 0}, {"sweeps_per_second": 5000}):
+                       {"initial_vx": -0.1}, {"initial_vx": 1.5}, {"sweeps_per_second": 0}, {"sweeps_per_second": 5000},
+                       {"nu": 0.0}, {"nu": 500.0}, {"inlet_vx": 0.0}, {"inlet_vx": 9.0}, {"dpdx": -500.0}, {"rho": 0.0}):
             with self.assertRaises(ValueError):
                 Params(**kwargs)
 
@@ -82,6 +83,22 @@ class EquationTests(unittest.TestCase):
                         got = cell_equation(t, Q, get(1, 0), get(-1, 0), get(0, 1), get(0, -1), a, b, w_in)
                         want = generic_equation(i, j, NX, NY, field, a, b, w_in, Q)
                         self.assertAlmostEqual(got, want, places=12, msg=f"type {t} cell ({i}, {j})")
+
+    def test_pressure_term_in_the_nine_equations(self):
+        rng = random.Random(11)
+        vx = {(i, j): rng.uniform(-1, 1) for j in range(NY) for i in range(NX)}
+        vy = {(i, j): rng.uniform(-1, 1) for j in range(NY) for i in range(NX)}
+        for pg in (-0.3, 0.0, 0.7):
+            for j in range(NY):
+                for i in range(NX):
+                    t = cell_type(i, j, NX, NY)
+                    a, b = vx[(i, j)], vy[(i, j)]
+
+                    def get(di, dj):
+                        return vx.get((i + di, j + dj), 0.0)
+                    got = cell_equation(t, Q, get(1, 0), get(-1, 0), get(0, 1), get(0, -1), a, b, 1.0, pg)
+                    want = generic_equation(i, j, NX, NY, vx, a, b, 1.0, Q, pg)
+                    self.assertAlmostEqual(got, want, places=12, msg=f"type {t} pg {pg}")
 
     def test_interior_matches_report_formula(self):
         # vx(i,j) = 1/4 [E + W + N + S - (h/2) vx (E - W) - (h/2) vy (N - S)], h/2 = 2.5
@@ -105,8 +122,8 @@ class EquationTests(unittest.TestCase):
 
 
 class SolverTests(unittest.TestCase):
-    def solve(self, omega, max_iter=3000, initial_vx=0.0):
-        s = ChannelFlowSolver(Params(omega=omega, tol=1e-6, initial_vx=initial_vx))
+    def solve(self, omega, max_iter=3000, initial_vx=0.0, **model):
+        s = ChannelFlowSolver(Params(omega=omega, tol=1e-6, initial_vx=initial_vx, **model))
         for _ in range(max_iter):
             s.sweep()
             if s.converged or s.diverged:
@@ -136,6 +153,35 @@ class SolverTests(unittest.TestCase):
         for i in range(NX):
             for j in range(NY // 2):
                 self.assertAlmostEqual(s.vx[j][i], s.vx[NY - 1 - j][i], places=5)
+
+    def test_report_flow_dies_out_before_the_outlet(self):
+        # With the report's constant pressure the flow stops well before the outlet (about 220 m of 400).
+        d = self.solve(0.8).live_data()
+        self.assertTrue(200 <= d["reach"] <= 240, d)
+        self.assertLess(d["flow_out"], 0.01)
+        self.assertGreater(d["flow_in"], 30.0)
+
+    def test_pressure_gradient_pushes_the_flow_to_the_outlet(self):
+        s = self.solve(0.8, dpdx=-2.0)
+        self.assertTrue(s.converged)
+        d = s.live_data()
+        self.assertEqual(d["reach"], 400.0)
+        self.assertGreater(d["flow_out"], 10.0)
+        self.assertGreater(s.vx[s.ny // 2][s.nx - 1], 0.1)
+
+    def test_over_relaxation_works_with_higher_viscosity(self):
+        # Cell Reynolds number h*V/nu = 1.25 with nu = 4: the central scheme is a proper average and
+        # over-relaxation converges (it does not with nu = 1, where the cell Reynolds number is 5).
+        s = self.solve(1.4, nu=4.0)
+        self.assertTrue(s.converged)
+        self.assertLess(s.iteration, 300)
+
+    def test_live_data_and_reference_speed(self):
+        s = ChannelFlowSolver(Params())
+        self.assertEqual(set(s.live_data()), {"flow_in", "flow_out", "vmax", "reach"})
+        self.assertEqual(s.mesh()["vref"], 1.0)
+        # the peak of the Poiseuille profile driven by dP/dx = -7.5 (nu = 1, rho = 1000, W = 40) is 1.5 m/s
+        self.assertAlmostEqual(ChannelFlowSolver(Params(dpdx=-7.5)).mesh()["vref"], 1.5)
 
     def test_diverged_state_is_finite_and_serializable(self):
         # Regression: a diverging run used to overflow to inf/NaN and break sample()/JSON.

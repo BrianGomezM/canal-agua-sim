@@ -40,6 +40,12 @@ con ν = 1 m²/s. La incompresibilidad (4.59) **no se impone** en esta etapa.
 | Piso y techo | vₓ = vᵧ = 0 (Dirichlet) |
 | Salida (derecha) | ∂v/∂x = 0 (Neumann, nodo fantasma: E = W) |
 
+**Variables del modelo.** Con los valores del informe (ν = 1 m²/s, entrada 1 m/s, ∂P/∂x = 0) la aplicación
+reproduce exactamente el planteamiento. La interfaz permite variarlos para explorar el modelo (botón
+*Valores del informe* los restablece): la viscosidad ν, la velocidad de entrada y el gradiente de presión
+∂P/∂x (Pa/m, ρ = 10³ kg/m³). Con ∂P/∂x ≠ 0 se añade el término de presión de (4.60) y aparece un flujo que
+sí llega a la salida; con 0 desaparece y las ecuaciones son las del informe.
+
 ### Malla
 
 Las celdas originales de 1 m se agrupan en bloques de 5 × 5 m: **80 × 8 = 640 celdas**, h = 5 m,
@@ -52,7 +58,10 @@ desde la interfaz ni desde la API.
 Con diferencias centradas (error O(h²)) y despejando la celda central C, con vecinas
 E = (i+1, j), W = (i−1, j), N = (i, j+1), S = (i, j−1), a = vₓ(i, j), b = vᵧ(i, j) y q = h/(2ν) = 2.5:
 
-    C = ¼ [E + W + N + S − q·a·(E − W) − q·b·(N − S)]
+    C = ¼ [E + W + N + S − q·a·(E − W) − q·b·(N − S) − p]
+
+con p = 0 en el informe (presión constante). Solo si se elige ∂P/∂x ≠ 0, para vₓ es
+p = h²/(ν·ρ) · ∂P/∂x (para vᵧ siempre 0).
 
 Donde a una celda de borde le falta una vecina se usa el valor de la frontera. Según qué vecinas
 falten hay **9 tipos** de ecuación:
@@ -82,18 +91,21 @@ menor que la tolerancia (por defecto 10⁻⁶).
 
 - **ω ≥ 0.95 no converge.** Con h = 5 m y ν = 1 m²/s el número de Reynolds de celda es 5 y, con vₓ = 1, el
   coeficiente de la vecina E en la fórmula centrada es ¼(1 − 2.5) < 0. Converge para ω ≤ 0.9 (lo más
-  rápido cerca de 0.85, unas 220 iteraciones). Para ω ≥ 0.95, con vₓ = 1 de valor inicial diverge; con
-  vₓ = 0 de valor inicial, entre 0.95 y 1 no converge (el residuo no baja de ≈ 0.5, medido en 6 000
-  iteraciones) y desde 1.05 diverge. El valor por defecto es **ω = 0.8** (253–273 iteraciones).
-- **La solución no depende del valor inicial.** El informe sugiere vₓ = 1 en todo el canal; el valor por
-  defecto de la interfaz es vₓ = 0 (se ve el flujo entrar). Ambos convergen a la misma solución (diferencia
-  ≈ 4·10⁻⁵ con tolerancia 10⁻⁶).
+  rápido cerca de 0.85, unas 220 iteraciones). Para ω ≥ 0.95, con el valor inicial vₓ = 1 que sugiere el
+  informe diverge; con vₓ = 0 (el que usa la aplicación), entre 0.95 y 1 no converge (el residuo no baja de
+  ≈ 0.5, medido en 6 000 iteraciones) y desde 1.05 diverge. El valor por defecto es **ω = 0.8**
+  (273 iteraciones con vₓ = 0; 253 con vₓ = 1).
+- **La solución no depende del valor inicial.** El informe sugiere partir de vₓ = 1 en todo el canal; la
+  aplicación parte siempre de vₓ = 0 (se ve el flujo entrar), y con vₓ = 1 se llega a la misma solución
+  (diferencia ≈ 4·10⁻⁵ con tolerancia 10⁻⁶; lo comprueba una prueba automática).
 - **El flujo se frena y se apaga antes de la salida** (|V| ≥ 0.03 m/s solo hasta x ≈ 220 m). Es una
   consecuencia del planteamiento (presión constante, paredes que frenan y continuidad no impuesta): la
   solución es simétrica, con 0 ≤ vₓ ≤ 1 y vᵧ ≡ 0. No es un defecto del dibujo ni del solver.
 - **La animación de arranque es el avance de las iteraciones**, no tiempo real: el modelo es estacionario.
   Cuando converge, el campo ya no cambia. El "agua", el frente, las ondas y el relieve del *Canal 3D* son
-  una representación visual del campo calculado (el modelo no tiene profundidad).
+  una representación visual del campo calculado (el modelo no tiene profundidad). En el *Canal 3D* el
+  agua empieza vacía y su frente avanza desde la entrada con la velocidad calculada, sea cual sea el valor
+  inicial de la iteración, y se detiene donde el flujo se apaga.
 
 ## Cómo ejecutar
 
@@ -128,13 +140,23 @@ Abrir la URL que indique Vite, normalmente `http://localhost:5173`.
 
 ## Interfaz
 
-- **Pausar / Reanudar, Paso, Reiniciar**: control de la iteración.
-- **Factor de relajación ω**, **tolerancia**, **valor inicial de vₓ** (al reiniciar) y **velocidad de la
-  animación** (iteraciones por segundo).
-- **Estilo de vista** (mapa de calor o canal 3D), **Mostrar** (|V|, vₓ, vᵧ o tipo de celda), y las
-  opciones **Vectores**, **Relieve** y **Malla**.
+- **Pausar / Reanudar y Reiniciar**: control de la iteración. Al converger o divergir, Pausar se
+  desactiva y se usa Reiniciar. El estado (en marcha o en pausa) lo informa el servidor, así que el botón
+  siempre coincide con lo que hace el solver.
+- **Datos en vivo** (se actualizan en cada iteración): iteración, residuo, caudal de entrada y de salida
+  (Σ vₓ·h en la primera y última columna, m²/s), relación salida/entrada, alcance del flujo (última
+  columna con |V| ≥ 0.03 m/s), velocidad máxima y Reynolds de celda h·V/ν, además de la malla e incógnitas.
+- **Modelo** (reinicia la simulación al cambiar): ν, velocidad de entrada y ∂P/∂x, con el botón
+  *Valores del informe*.
+- **Método**: factor de relajación ω (con una ayuda que depende del Reynolds de celda) y velocidad de la
+  animación (iteraciones por segundo). La tolerancia es la del informe, 10⁻⁶, y la iteración siempre
+  parte de vₓ = 0.
+- **Estilo de vista** (mapa de calor o canal 3D), **Mostrar** (|V|, vₓ, vᵧ o tipo de celda), las
+  opciones **Vectores**, **Relieve** y **Malla**, y **Centrar vista** (vuelve a encuadrar el canal; con el
+  mouse se puede girar, acercar y desplazar, pero no pasar bajo el suelo).
 - **Puntero de consulta**: al pasar el cursor por una celda se marca en amarillo y se muestran su tipo,
-  su centro, la sustitución de vecinas que usa y sus velocidades.
+  su centro, la sustitución de vecinas que usa y sus velocidades, que cambian con cada iteración. Al
+  abrir la aplicación muestra la celda (10, 3) y luego conserva la última celda consultada.
 
 ## Arquitectura
 
@@ -145,15 +167,22 @@ Abrir la URL que indique Vite, normalmente `http://localhost:5173`.
 
 **WebSocket `/ws/sim`**:
 
-- Cliente → servidor: `{"type": "params", "params": {omega, tol, sweeps_per_second}}` (en marcha),
-  `{"type": "reset", "params": {omega, tol, initial_vx, sweeps_per_second}}`, `pause`, `resume`, `step`.
-  Cualquier otro parámetro (malla, ν, dimensiones) se ignora: son los del informe.
-- Servidor → cliente: `mesh` (dimensiones y tipo de cada celda), `state` (iteración, residuo, si convergió
-  o divergió, y los campos `vx` y `vy` por celda) y `error`.
+- Cliente → servidor: `{"type": "params", "params": {omega, tol, sweeps_per_second}}` (en marcha; sobre
+  una simulación divergida la reinicia), `{"type": "reset", "params": {omega, tol, sweeps_per_second,
+  nu, inlet_vx, dpdx}}`, `pause`, `resume`. La malla y las dimensiones no se pueden cambiar: son las del
+  informe.
+- Servidor → cliente: `mesh` (dimensiones, ν, ρ, ∂P/∂x, velocidad de entrada, `vref` —velocidad de
+  referencia de las escalas de color— y tipo de cada celda), `state` (iteración, residuo, si convergió o
+  divergió, si está en marcha o en pausa —`running`—, `flow_in`, `flow_out`, `vmax`, `reach` y los campos
+  `vx` y `vy` por celda) y `error`.
 
 ## Límites de esta etapa
 
-- La continuidad (4.59) no se impone y la presión es constante; por eso el flujo no llega a la salida.
+- La continuidad (4.59) no se impone y, con los valores del informe, la presión es constante; por eso el
+  flujo no llega a la salida (con ∂P/∂x = −2 Pa/m sí llega: alcance 400 m, unas 96 iteraciones).
+- Fuera de los valores del informe (ν, entrada, ∂P/∂x) el esquema centrado puede divergir: el Reynolds
+  de celda h·V/ν debe mantenerse bajo (con 5 converge ω ≤ 0.9; con ≤ 2.5 admite ω > 1; con ≥ 7.5 divergió
+  en todos los casos probados).
 - La solución analítica del libro (ec. 4.66) requiere ∂P/∂x ≠ 0, así que no aplica a este planteamiento (ver
   [docs/modelo_matematico.md](docs/modelo_matematico.md), §7).
 - Con h = 5 m el esquema centrado no admite ω ≥ 0.95; la sobrerrelajación de la ec. 4.63 no es utilizable

@@ -37,13 +37,21 @@ ecuaciones.
 - **¿Por qué ω < 1 y no la sobrerrelajación del libro?** Con h = 5 m y ν = 1 el número de Reynolds de celda
   es 5 y un coeficiente de la fórmula centrada es negativo (¼(1 − 2.5)). Para ω ≥ 0.95 el método no
   converge; converge para ω ≤ 0.9.
-- **¿El valor inicial cambia el resultado?** No: vₓ = 1 (el del informe) y vₓ = 0 dan la misma solución
-  (diferencia ≈ 4·10⁻⁵). Con 0 se ve el flujo "entrar" durante la animación.
+- **¿Por qué se parte de vₓ = 0 y no de vₓ = 1 como sugiere el informe?** El informe lo propone "por
+  ejemplo". Con vₓ = 0 se ve el flujo entrar; con vₓ = 1 todo el canal arranca a 1 m/s, incluso junto a las
+  paredes, y el método lo corrige. El resultado es el mismo (diferencia ≈ 4·10⁻⁵).
 - **¿La animación es el paso del tiempo?** No. El modelo es estacionario: lo que se anima son las
   iteraciones del método hasta converger.
 - **¿Por qué el flujo no llega a la salida?** Con presión constante nada empuja el fluido, las paredes lo
   frenan y la continuidad (4.59) no se impone (vᵧ ≡ 0). |V| ≥ 0.03 m/s solo hasta x ≈ 220 m.
-- **¿Cómo se valida?** Con 14 pruebas de las ecuaciones y del solver. La solución analítica del libro (ec.
+- **¿Se pueden cambiar ν, la velocidad de entrada o la presión?** Sí, como exploración: con los valores del
+  informe (ν = 1, entrada 1 m/s, ∂P/∂x = 0) es exactamente el planteamiento; el botón *Valores del
+  informe* los restablece. Con ∂P/∂x = −2 Pa/m el flujo sí llega a la salida (alcance 400 m, unas 96
+  iteraciones). Si el Reynolds de celda h·V/ν pasa de ≈ 6, el esquema centrado puede divergir.
+- **¿Qué datos se ven en vivo?** Iteración, residuo, caudal de entrada y de salida, alcance del flujo,
+  velocidad máxima y Reynolds de celda; el puntero de consulta muestra tipo, sustitución y velocidades de la
+  celda elegida y cómo cambian en cada iteración.
+- **¿Cómo se valida?** Con 19 pruebas de las ecuaciones y del solver. La solución analítica del libro (ec.
   4.66) necesita ∂P/∂x ≠ 0, así que no aplica con presión constante; la estrategia de validación se
   define con la docente.
 - **¿Por qué 80 × 8 y no una malla más fina?** Costo (16 000 → 640 ecuaciones por componente) y filas

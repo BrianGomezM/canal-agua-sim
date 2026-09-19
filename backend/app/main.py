@@ -18,10 +18,11 @@ app.add_middleware(
 )
 
 PARAM_FIELDS = {f.name for f in fields(Params)}
-# The mesh (400 x 40 m, 80 x 8 cells of 5 m) and the physics are those of the report and are fixed:
-# a client can only change how the solver is run.
+# The mesh (400 x 40 m, 80 x 8 cells of 5 m) is that of the report and is fixed. A client can change
+# how the solver is run and three variables of the model (viscosity, inlet speed, pressure gradient);
+# their defaults are the report's (nu = 1 m^2/s, 1 m/s, constant pressure).
 LIVE_FIELDS = ("omega", "tol", "sweeps_per_second")          # while it runs
-RESET_FIELDS = LIVE_FIELDS + ("initial_vx",)                # when it is restarted
+RESET_FIELDS = LIVE_FIELDS + ("nu", "inlet_vx", "dpdx")     # model variables: they change the equations, so the run restarts
 MAX_SWEEPS_PER_TICK = 50                                    # bounds the work done between two frames
 TICK = 1.0 / 60.0
 
@@ -58,6 +59,10 @@ async def simulation_socket(ws: WebSocket):
     running = True
     inbox: asyncio.Queue = asyncio.Queue()
 
+    def state() -> dict:
+        # `running` travels with every state so the buttons of the browser always match the server.
+        return {"type": "state", "data": {**sim.sample(), "running": running}}
+
     async def reader():
         # Messages are read concurrently with the iteration, so the pace of the animation does not
         # depend on polling the socket with timeouts (timer granularity is coarse on Windows).
@@ -69,7 +74,7 @@ async def simulation_socket(ws: WebSocket):
 
     reader_task = asyncio.create_task(reader())
     await ws.send_json({"type": "mesh", "data": sim.mesh()})
-    await ws.send_json({"type": "state", "data": sim.sample()})
+    await ws.send_json(state())
 
     budget = 0.0                    # fractional iterations owed to the animation pace
     last = time.perf_counter()
@@ -98,10 +103,7 @@ async def simulation_socket(ws: WebSocket):
                         running = False
                     elif kind == "resume":
                         running = True
-                    elif kind == "step":
-                        running = False
-                        sim.sweep()
-                    await ws.send_json({"type": "state", "data": sim.sample()})
+                    await ws.send_json(state())
                 except ValueError as exc:
                     await ws.send_json({"type": "error", "message": str(exc)})
 
@@ -115,7 +117,7 @@ async def simulation_socket(ws: WebSocket):
                     if sim.converged or sim.diverged:
                         break
                 if n:
-                    await ws.send_json({"type": "state", "data": sim.sample()})
+                    await ws.send_json(state())
             else:
                 budget = 0.0
             last = now
